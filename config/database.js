@@ -3,10 +3,10 @@ const redis = require('redis');
 // Redis client setup
 const redisClient = redis.createClient({
   socket: {
-    host: process.env.REDIS_HOST || '192.168.1.72',
-    port: process.env.REDIS_PORT || 6379,
+    host: process.env.REDIS_HOST,
+    port: process.env.REDIS_PORT,
   },
-  password: process.env.REDIS_PASSWORD || 'cgraaaj@redis'
+  password: process.env.REDIS_PASSWORD
 });
 
 let redisConnected = false;

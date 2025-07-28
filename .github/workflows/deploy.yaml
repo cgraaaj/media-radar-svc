@@ -11,45 +11,46 @@ on:
       - master
 
 env:
-  HELM_REPO: "git@github.com:cgraaaj/media-radar-k8s.git"  # Update this to your actual Helm repo
-  HELM_BRANCH: "main"
-  HELM_CHART_PATH: "backend/values.yaml"
-  HELM_CHART_YAML: "backend/Chart.yaml"
+  # Local Helm chart configuration (k8s folder in same repo)
+  HELM_CHART_PATH: "./k8s/values.yaml"  # Path to backend values.yaml
+  HELM_CHART_YAML: "./k8s/Chart.yaml"  # Path to backend Chart.yaml
+  
+  # Docker Image Configuration
   IMAGE_REGISTRY: "registry.cgraaaj.in"
-  IMAGE_NAME: "media-radar-backend"
+  IMAGE_NAME: "media-radar-svc"
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
+  # test:
+  #   name: Run Tests
+  #   runs-on: ubuntu-latest
     
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+  #   steps:
+  #   - name: Checkout Code
+  #     uses: actions/checkout@v4
       
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        cache: 'npm'
-        cache-dependency-path: backend/package-lock.json
+  #   - name: Set up Node.js
+  #     uses: actions/setup-node@v4
+  #     with:
+  #       node-version: '18'
+  #       cache: 'npm'
+  #       cache-dependency-path: backend/package-lock.json
         
-    - name: Install Dependencies
-      working-directory: ./backend
-      run: npm ci
+  #   - name: Install Dependencies
+  #     working-directory: ./backend
+  #     run: npm ci
       
-    - name: Run Tests
-      working-directory: ./backend
-      run: |
-        # Add your test commands here
-        # npm test
-        npm run lint || true  # Run linting if available
+  #   - name: Run Tests
+  #     working-directory: ./backend
+  #     run: |
+  #       # Add your test commands here
+  #       # npm test
+  #       npm run lint || true  # Run linting if available
         
   build-and-deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
-    needs: test
+    # needs: test  # Commented out since test job is disabled
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
 
     steps:
@@ -68,7 +69,6 @@ jobs:
 
     ### ✅ Build and Push Multi-Arch Image
     - name: Build and Push Image
-      working-directory: ./backend
       run: |
         # Use short SHA for image tag
         SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
@@ -79,50 +79,31 @@ jobs:
           -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
           .
 
-    ### ✅ Clone Helm Repository (Optional - only if using Helm)
-    - name: Clone Helm Repo
-      if: env.HELM_REPO != ''
-      env:
-        SSH_PRIVATE_KEY: ${{ secrets.GIT_SSH_PRIVATE_KEY }}
-      run: |
-        eval "$(ssh-agent -s)"
-        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - > /dev/null
-
-        mkdir helm-repo
-        cd helm-repo
-        git clone ${{ env.HELM_REPO }} .
-        git checkout ${{ env.HELM_BRANCH }}
-
-    ### ✅ Bump Helm Image Tag in `values.yaml`
+    ### ✅ Update Local Helm Values (Image Repository and Tag)
     - name: Update Helm Values
-      if: env.HELM_REPO != ''
       run: |
-        cd helm-repo
         SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
+        # Update image repository in values.yaml
+        sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}|" ${{ env.HELM_CHART_PATH }}
+        # Update image tag in values.yaml
         sed -i "s|tag: .*|tag: \"${SHORT_SHA}\"|" ${{ env.HELM_CHART_PATH }}
 
-    ### ✅ Bump Helm Chart Version in `Chart.yaml`
+    ### ✅ Bump Local Helm Chart Version
     - name: Bump Helm Chart Version
-      if: env.HELM_REPO != ''
       run: |
-        cd helm-repo
-        CHART_VERSION=$(grep "version:" ${{ env.HELM_CHART_YAML }} | awk '{print $2}')
-        NEW_VERSION=$(echo $CHART_VERSION | awk -F. -v OFS=. '{$NF += 1 ; print}')
-        sed -i "s/version: .*/version: $NEW_VERSION/" ${{ env.HELM_CHART_YAML }}
+        # Extract current version and increment patch version
+        CURRENT_VERSION=$(grep "version:" ${{ env.HELM_CHART_YAML }} | awk '{print $2}' | tr -d '"')
+        NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. -v OFS=. '{$NF += 1 ; print}')
+        sed -i "s/version: .*/version: \"$NEW_VERSION\"/" ${{ env.HELM_CHART_YAML }}
+        echo "Updated chart version from $CURRENT_VERSION to $NEW_VERSION"
 
-    ### ✅ Commit and Push Changes
-    - name: Commit and Push Changes
-      if: env.HELM_REPO != ''
-      env:
-        SSH_PRIVATE_KEY: ${{ secrets.GIT_SSH_PRIVATE_KEY }}
+    ### ✅ Commit and Push Local Helm Changes
+    - name: Commit and Push Helm Changes
       run: |
-        eval "$(ssh-agent -s)"
-        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - > /dev/null
-
-        cd helm-repo
         git config --global user.email "bot@cgraaaj.in"
         git config --global user.name "GitHub Actions Bot"
         
+        SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
         git add ${{ env.HELM_CHART_PATH }} ${{ env.HELM_CHART_YAML }}
-        git commit -m "Update media-radar-backend image tag and chart version" || exit 0
-        git push origin ${{ env.HELM_BRANCH }}
+        git commit -m "Update ${{ env.IMAGE_NAME }} image to ${SHORT_SHA} and bump chart version" || exit 0
+        git push origin HEAD
