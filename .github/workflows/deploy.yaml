@@ -16,7 +16,8 @@ env:
   HELM_CHART_YAML: "./k8s/Chart.yaml"  # Path to backend Chart.yaml
   
   # Docker Image Configuration
-  IMAGE_REGISTRY: "registry.cgraaaj.in/media-radar"
+  IMAGE_REGISTRY: "registry.cgraaaj.in"
+  IMAGE_REPOSITORY: "media-radar"
   IMAGE_NAME: "media-radar-svc"
   IMAGE_TAG: ${{ github.sha }}
 
@@ -76,8 +77,8 @@ jobs:
         docker buildx build \
           --platform linux/amd64,linux/arm64 \
           --push \
-          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${SHORT_SHA} \
-          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}:${SHORT_SHA} \
+          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest \
           .
 
     ### ✅ Update Local Helm Values (Image Repository and Tag)
@@ -85,7 +86,7 @@ jobs:
       run: |
         SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
         # Update image repository in values.yaml
-        sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}|" ${{ env.HELM_CHART_PATH }}
+        sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}|" ${{ env.HELM_CHART_PATH }}
         # Update image tag in values.yaml
         sed -i "s|tag: .*|tag: \"${SHORT_SHA}\"|" ${{ env.HELM_CHART_PATH }}
 
