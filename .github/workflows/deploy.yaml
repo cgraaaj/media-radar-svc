@@ -64,31 +64,30 @@ jobs:
 
     ### ✅ Login to Harbor Registry
     - name: Docker Login to Harbor
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.IMAGE_REGISTRY }}
-        username: ${{ secrets.HARBOR_USERNAME }}
-        password: ${{ secrets.HARBOR_PASSWORD }}
+      run: |
+        echo "${{ secrets.HARBOR_PASSWORD }}" | docker login ${{ env.IMAGE_REGISTRY }} -u ${{ secrets.HARBOR_USERNAME }} --password-stdin
 
 
     ### ✅ Build and Push Multi-Arch Image
     - name: Build and Push Image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: |
-          ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+      run: |
+        # Use short SHA for image tag
+        SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --push \
+          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${SHORT_SHA} \
+          -t ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          .
 
     ### ✅ Update Local Helm Values (Image Repository and Tag)
     - name: Update Helm Values
       run: |
+        SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
         # Update image repository in values.yaml
         sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}|" ${{ env.HELM_CHART_PATH }}
         # Update image tag in values.yaml
-        sed -i "s|tag: .*|tag: \"${{ github.sha }}\"|" ${{ env.HELM_CHART_PATH }}
+        sed -i "s|tag: .*|tag: \"${SHORT_SHA}\"|" ${{ env.HELM_CHART_PATH }}
 
     ### ✅ Bump Local Helm Chart Version
     - name: Bump Helm Chart Version
@@ -105,6 +104,7 @@ jobs:
         git config --global user.email "bot@cgraaaj.in"
         git config --global user.name "GitHub Actions Bot"
         
+        SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
         git add ${{ env.HELM_CHART_PATH }} ${{ env.HELM_CHART_YAML }}
-        git commit -m "Update ${{ env.IMAGE_NAME }} image to ${{ github.sha }} and bump chart version" || exit 0
+        git commit -m "Update ${{ env.IMAGE_NAME }} image to ${SHORT_SHA} and bump chart version" || exit 0
         git push origin HEAD
