@@ -16,7 +16,7 @@ env:
   HELM_CHART_YAML: "./k8s/Chart.yaml"  # Path to backend Chart.yaml
   
   # Docker Image Configuration
-  IMAGE_REGISTRY: "registry.cgraaaj.in"
+  IMAGE_REGISTRY: "registry.cgraaaj.in/media-radar"
   IMAGE_NAME: "media-radar-svc"
   IMAGE_TAG: ${{ github.sha }}
 
