@@ -2,13 +2,13 @@ const axios = require('axios');
 const { normalizeLanguage, cleanFilename, formatFileSize, extractSizeFromFilename, getSafePosterUrl, analyzeGenreFromTitle } = require('../helpers/utils');
 
 // API configurations from environment variables
-const TMDB_API_KEY = process.env.TMDB_API_KEY || '1dd48da5671e983380346d36c3e0257c';
-const TMDB_ACCESS_TOKEN = process.env.TMDB_ACCESS_TOKEN || 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIxZGQ0OGRhNTY3MWU5ODMzODAzNDZkMzZjM2UwMjU3YyIsIm5iZiI6MTc1MzEzODE2Mi4xMzY5OTk4LCJzdWIiOiI2ODdlYzNmMjJiOTMwZmI2ZDU1MjkxODUiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.tbDjrzggXfRbjkH4N9OimwYDF1TlDqKj5s4Kfq9kCI8';
-const TMDB_BASE_URL = process.env.TMDB_BASE_URL || 'https://api.themoviedb.org/3';
-const TMDB_IMAGE_BASE_URL = process.env.TMDB_IMAGE_BASE_URL || 'https://image.tmdb.org/t/p/w500';
+const TMDB_API_KEY = process.env.TMDB_API_KEY ;
+const TMDB_ACCESS_TOKEN = process.env.TMDB_ACCESS_TOKEN ;
+const TMDB_BASE_URL = process.env.TMDB_BASE_URL ;
+const TMDB_IMAGE_BASE_URL = process.env.TMDB_IMAGE_BASE_URL ;
 
-const OMDB_API_KEY = process.env.OMDB_API_KEY || '5da92aeb';
-const OMDB_BASE_URL = process.env.OMDB_BASE_URL || 'http://www.omdbapi.com/';
+const OMDB_API_KEY = process.env.OMDB_API_KEY ;
+const OMDB_BASE_URL = process.env.OMDB_BASE_URL ;
 
 const DEFAULT_POSTERS = {
   movies: process.env.DEFAULT_MOVIES_POSTER || 'https://via.placeholder.com/300x450/2a2a2a/ffffff?text=🎬',
@@ -215,7 +215,6 @@ class MediaService {
 
   // Format OMDb TV show data
   formatOMDbTVShowData(show) {
-    // console.log(`Formatting OMDb TV show data: ${JSON.stringify(show)}`);
     return {
       title: show.Title,
       tagline: '',
