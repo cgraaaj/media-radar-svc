@@ -66,10 +66,10 @@ ingressRoute:
   entryPoints:
     - websecure # HTTPS entry point
   routes:
-    - match: Host(`media-radar-svc.cgraaaj.in`) && PathPrefix(`/`)
+    - match: Host(`mediaradar-svc.cgraaaj.in`) && PathPrefix(`/`)
       kind: Rule
       services:
-        - name: media-radar-svc-media-radar-svc-k8s
+        - name: media-radar-svc-k8s
           port: 5000
   tls:
     secretName: "media-radar-svc-cgraaaj-in-tls"
