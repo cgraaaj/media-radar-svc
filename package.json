@@ -1,0 +1,30 @@
+{
+  "name": "media-radar-backend",
+  "version": "1.0.0",
+  "description": "Backend API for movie downloader app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "docker:build": "docker build -t media-radar-backend .",
+    "docker:run": "docker run -d -p 5000:5000 --env-file .env --name media-radar-backend media-radar-backend",
+    "docker:stop": "docker stop media-radar-backend && docker rm media-radar-backend",
+    "docker:logs": "docker logs -f media-radar-backend",
+    "compose:up": "docker-compose up -d",
+    "compose:down": "docker-compose down",
+    "compose:prod": "docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d",
+    "compose:logs": "docker-compose logs -f"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "parse-torrent": "^9.1.5",
+    "redis": "^4.6.8",
+    "webtorrent": "^2.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
