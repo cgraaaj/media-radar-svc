@@ -6,6 +6,11 @@
 .env.production.local
 .env.backup
 
+# Kubernetes production values (contains secrets)
+k8s/values-prod.yaml
+k8s/values-production.yaml
+k8s/values-staging.yaml
+
 # Dependencies
 node_modules/
 npm-debug.log*

@@ -87,7 +87,7 @@ jobs:
       run: |
         SHORT_SHA=$(echo $GITHUB_SHA | head -c7)
         # Update image repository in values.yaml
-        sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}|" ${{ env.HELM_CHART_PATH }}
+        sed -i "s|repository: .*|repository: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}|" ${{ env.HELM_CHART_PATH }}
         # Update image tag in values.yaml
         sed -i "s|tag: .*|tag: \"${SHORT_SHA}\"|" ${{ env.HELM_CHART_PATH }}
 

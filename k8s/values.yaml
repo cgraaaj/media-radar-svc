@@ -55,6 +55,8 @@ service:
   type: ClusterIP
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 5000
+
+# Ingress configuration
 ingress:
   enabled: true
 
@@ -66,14 +68,44 @@ ingressRoute:
   entryPoints:
     - websecure # HTTPS entry point
   routes:
-    - match: Host(`mediaradar-svc.cgraaaj.in`) && PathPrefix(`/`)
+    - match: Host(`mediaradar.cgraaaj.in`) && PathPrefix(`/api`)
       kind: Rule
+      middlewares:
+        - name: api-stripprefix
       services:
-        - name: media-radar-svc-k8s
+        - name: mediaradar-svc-k8s
           port: 5000
   tls:
-    secretName: "media-radar-svc-cgraaaj-in-tls"
+    secretName: "mediaradar-cgraaaj-in-tls"
 
+# Vault Agent Injector Configuration
+# Enable Vault Agent Injector for secret management
+vault:
+  enabled: true
+  path: "media-radar"
+  version: "v2"
+  auth:
+    mountPath: "kubernetes"
+    role: "media-radar-role"
+  agent:
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+    requests:
+      cpu: "10m"
+      memory: "64Mi"
+  # Where injector mounts rendered secrets
+  secretVolumePath: "/vault/secrets"
+  # Configure what to inject via annotations
+  inject:
+    # name => Vault secret path (for file injection)
+    secrets: {}
+    # name => Vault secret path (for env injection)
+    env: {}
+    # name => template body (for custom rendered files)
+    templates: {}
+  # Optional: direct env variables (values may include Vault template strings if desired)
+  env: {}
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -123,3 +155,53 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Environment Variables Configuration
+# Note: Sensitive values (passwords, API keys, secrets) are injected by Vault
+# and should not be specified here. Only non-sensitive configuration should be included.
+env:
+  # Server Configuration
+  nodeEnv: "production"
+  host: "0.0.0.0"
+  frontendUrl: "https://mediaradar.cgraaaj.in"
+  allowedOrigins: "https://mediaradar.cgraaaj.in,http://localhost:3000"
+  
+  # Redis Configuration (non-sensitive values only)
+  redis:
+    host: "redis-service"  # Update with your actual Redis service name
+    port: "6379"
+    # password is fetched from Vault, not needed here
+  
+  # TMDB API Configuration (non-sensitive values only)
+  tmdb:
+    baseUrl: "https://api.themoviedb.org/3"
+    imageBaseUrl: "https://image.tmdb.org/t/p/w500"
+    # apiKey and accessToken are fetched from Vault, not needed here
+  
+  # OMDB API Configuration (non-sensitive values only)
+  omdb:
+    baseUrl: "http://www.omdbapi.com/"
+    # apiKey is fetched from Vault, not needed here
+  
+  # Default Settings
+  defaults:
+    moviesPoster: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=🎬"
+    tvshowsPoster: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=📺"
+  
+  # Cache Settings
+  cache:
+    ttl: "3600"
+    maxSize: "1000"
+  
+  # Rate Limiting
+  rateLimit:
+    limit: "100"
+    window: "900000"
+  
+  # Security Settings (fetched from Vault, not needed here)
+  # jwtSecret and sessionSecret are fetched from Vault
+  
+  # Logging Configuration
+  logging:
+    level: "info"
+    format: "combined"

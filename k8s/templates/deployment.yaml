@@ -13,10 +13,37 @@ spec:
       {{- include "media-radar-svc-k8s.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        {{- if .Values.vault.enabled }}
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/agent-inject-status: "update"
+        vault.hashicorp.com/agent-inject-token: "true"
+        vault.hashicorp.com/role: "{{ .Values.vault.auth.role }}"
+        vault.hashicorp.com/secret-volume-path: "{{ .Values.vault.secretVolumePath | default "/vault/secrets" }}"
+        {{- with .Values.vault.agent }}
+        {{- with .limits }}
+        vault.hashicorp.com/agent-limits-cpu: "{{ .cpu }}"
+        vault.hashicorp.com/agent-limits-mem: "{{ .memory }}"
+        {{- end }}
+        {{- with .requests }}
+        vault.hashicorp.com/agent-requests-cpu: "{{ .cpu }}"
+        vault.hashicorp.com/agent-requests-mem: "{{ .memory }}"
+        {{- end }}
+        {{- end }}
+        {{- range $name, $path := .Values.vault.inject.secrets }}
+        vault.hashicorp.com/agent-inject-secret-{{ $name }}: "{{ $path }}"
+        {{- end }}
+        {{- range $name, $path := .Values.vault.inject.env }}
+        vault.hashicorp.com/agent-inject-env-{{ $name }}: "{{ $path }}"
+        {{- end }}
+        {{- range $name, $template := .Values.vault.inject.templates }}
+        vault.hashicorp.com/agent-inject-template-{{ $name }}: |
+{{ $template | nindent 10 }}
+        {{- end }}
+        {{- end }}
       labels:
         {{- include "media-radar-svc-k8s.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -46,13 +73,34 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.volumeMounts }}
+          {{- if or .Values.vault.enabled .Values.volumeMounts }}
           volumeMounts:
+            {{- if .Values.vault.enabled }}
+            - name: vault-secrets
+              mountPath: {{ .Values.vault.secretVolumePath | default "/vault/secrets" | quote }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- with .Values.volumes }}
+          {{- with .Values.vault.env }}
+          env:
+            {{- range $name, $value := . }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.vault.enabled .Values.volumes }}
       volumes:
+        {{- if .Values.vault.enabled }}
+        - name: vault-secrets
+          emptyDir:
+            medium: Memory
+        {{- end }}
+        {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

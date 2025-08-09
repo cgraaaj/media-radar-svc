@@ -1,0 +1,60 @@
+{{- if .Values.ingressRoute.enabled }}
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "media-radar-svc-k8s.fullname" . }}
+  labels:
+    {{- include "media-radar-svc-k8s.labels" . | nindent 4 }}
+  {{- with .Values.ingressRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- with .Values.ingressRoute.entryPoints }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  routes:
+    {{- range .Values.ingressRoute.routes }}
+    - match: {{ .match | quote }}
+      kind: {{ .kind | default "Rule" }}
+      {{- if .middlewares }}
+      middlewares:
+        {{- range .middlewares }}
+        - name: {{ .name }}
+          {{- if .namespace }}
+          namespace: {{ .namespace }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      services:
+        {{- range .services }}
+        - name: {{ .name | default (include "media-radar-svc-k8s.fullname" $) }}
+          port: {{ .port | default $.Values.service.port }}
+          {{- if .scheme }}
+          scheme: {{ .scheme }}
+          {{- end }}
+          {{- if .weight }}
+          weight: {{ .weight }}
+          {{- end }}
+        {{- end }}
+    {{- end }}
+  {{- if .Values.ingressRoute.tls }}
+  tls:
+    {{- if .Values.ingressRoute.tls.secretName }}
+    secretName: {{ .Values.ingressRoute.tls.secretName }}
+    {{- end }}
+    {{- if .Values.ingressRoute.tls.domains }}
+    domains:
+      {{- range .Values.ingressRoute.tls.domains }}
+      - main: {{ .main }}
+        {{- if .sans }}
+        sans:
+          {{- range .sans }}
+          - {{ . }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }} 
