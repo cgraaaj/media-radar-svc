@@ -96,6 +96,10 @@ vault:
       memory: "64Mi"
   # Where injector mounts rendered secrets
   secretVolumePath: "/vault/secrets"
+  # Vault volume name and toggles (set to false if you define your own)
+  volumeName: "vault-secrets"
+  addVolume: true
+  addVolumeMount: true
   # Configure what to inject via annotations
   inject:
     # name => Vault secret path (for file injection)
