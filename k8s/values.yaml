@@ -33,7 +33,10 @@ serviceAccount:
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/ 
-podAnnotations: {}
+podAnnotations:
+  vault.hashicorp.com/auth-path: kubernetes
+  vault.hashicorp.com/service-account-token-audience: "vault"
+  vault.hashicorp.com/service-account-token-expiration: "3600"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
