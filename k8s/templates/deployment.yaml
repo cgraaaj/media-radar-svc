@@ -73,16 +73,9 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or .Values.vault.enabled .Values.volumeMounts }}
+          {{- with .Values.volumeMounts }}
           volumeMounts:
-            {{- if and .Values.vault.enabled (.Values.vault.addVolumeMount | default true) }}
-            - name: {{ .Values.vault.volumeName | default "vault-secrets" }}
-              mountPath: {{ .Values.vault.secretVolumePath | default "/vault/secrets" | quote }}
-              readOnly: true
-            {{- end }}
-            {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- end }}
           {{- with .Values.vault.env }}
           env:
@@ -91,16 +84,9 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
           {{- end }}
-      {{- if or .Values.vault.enabled .Values.volumes }}
+      {{- with .Values.volumes }}
       volumes:
-        {{- if and .Values.vault.enabled (.Values.vault.addVolume | default true) }}
-        - name: {{ .Values.vault.volumeName | default "vault-secrets" }}
-          emptyDir:
-            medium: Memory
-        {{- end }}
-        {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
