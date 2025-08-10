@@ -58,7 +58,7 @@ service:
 
 # Ingress configuration
 ingress:
-  enabled: true
+  enabled: false
 
 ## Enable Traefik IngressRoute
 ingressRoute:
