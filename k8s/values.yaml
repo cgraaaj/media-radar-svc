@@ -86,7 +86,7 @@ vault:
   version: "v2"
   auth:
     mountPath: "kubernetes"
-    role: "media-radar-role"
+    role: "media-radar-dev-role"
   agent:
     limits:
       cpu: "100m"
