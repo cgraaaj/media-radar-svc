@@ -2,9 +2,9 @@
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: {{ include "media-radar-svc-k8s.fullname" . }}
+  name: {{ include "k8s.fullname" . }}
   labels:
-    {{- include "media-radar-svc-k8s.labels" . | nindent 4 }}
+    {{- include "k8s.labels" . | nindent 4 }}
   {{- with .Values.ingressRoute.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -29,7 +29,7 @@ spec:
       {{- end }}
       services:
         {{- range .services }}
-        - name: {{ .name | default (include "media-radar-svc-k8s.fullname" $) }}
+        - name: {{ .name | default (include "k8s.fullname" $) }}
           port: {{ .port | default $.Values.service.port }}
           {{- if .scheme }}
           scheme: {{ .scheme }}
