@@ -49,6 +49,12 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
+        {{- if .Values.vault.inject.templates }}
+        {{- range $name, $template := .Values.vault.inject.templates }}
+        vault.hashicorp.com/agent-inject-template-{{ $name }}: |
+          {{- $template | nindent 10 }}
+        {{- end }}
+        {{- end }}
         {{- end }}
       labels:
         {{- include "k8s.labels" . | nindent 8 }}

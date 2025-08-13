@@ -54,21 +54,39 @@ spec:
   template:
     metadata:
       annotations:
-        vault.hashicorp.com/service-account-token-expiration: "3600"
+        # vault.hashicorp.com/service-account-token-expiration: "3600"
         vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/agent-inject-token: "true"
-        vault.hashicorp.com/auth-path: "kubernetes"
+        # vault.hashicorp.com/agent-inject-token: "true"
+        # vault.hashicorp.com/auth-path: "kubernetes"
         vault.hashicorp.com/role: "mediaradar-svc-role"
-        vault.hashicorp.com/secret-volume-path: "/vault/secrets"
-        vault.hashicorp.com/agent-limits-cpu: "100m"
-        vault.hashicorp.com/agent-limits-mem: "128Mi"
-        vault.hashicorp.com/agent-requests-cpu: "10m"
-        vault.hashicorp.com/agent-requests-mem: "64Mi"
-        vault.hashicorp.com/agent-inject-env-OMDB_API_KEY: "secret/mediaradar-svc/api-keys/primary_key"
-        vault.hashicorp.com/agent-inject-env-REDIS_PASSWORD: "database/creds/redis-readonly/password"
-        vault.hashicorp.com/agent-inject-env-REDIS_USERNAME: "database/creds/redis-readonly/username"
-        vault.hashicorp.com/agent-inject-env-TMDB_ACCESS_TOKEN: "secret/mediaradar-svc/api/secondary_token"
-        vault.hashicorp.com/agent-inject-env-TMDB_API_KEY: "secret/mediaradar-svc/api-keys/secondary_key"
+        # vault.hashicorp.com/secret-volume-path: "/vault/secrets"
+        # vault.hashicorp.com/agent-limits-cpu: "100m"
+        # vault.hashicorp.com/agent-limits-mem: "128Mi"
+        # vault.hashicorp.com/agent-requests-cpu: "10m"
+        # vault.hashicorp.com/agent-requests-mem: "64Mi"
+        # vault.hashicorp.com/agent-inject-secret-creds.env: "secret/mediaradar-svc/api-keys"
+        # vault.hashicorp.com/agent-inject-env-OMDB_API_KEY: "mediaradar/api-keys/OMDB_API_KEY"
+        # vault.hashicorp.com/agent-inject-env-REDIS_PASSWORD: "database/creds/redis-readonly/password"
+        # vault.hashicorp.com/agent-inject-env-REDIS_USERNAME: "database/creds/redis-readonly/username"
+        # vault.hashicorp.com/agent-inject-env-TMDB_ACCESS_TOKEN: "mediaradar/api-keys/TMDB_ACCESS_TOKEN"
+        vault.hashicorp.com/agent-inject-secret-creds.env: "database/creds/redis-readonly"
+        vault.hashicorp.com/agent-inject-template-creds.env: |
+          {{- with secret "database/creds/redis-readonly" -}}
+          export REDIS_USERNAME="{{ .Data.username }}"
+          export REDIS_PASSWORD="{{ .Data.password }}"
+          {{- end }}
+        vault.hashicorp.com/agent-inject-env-app-config: "mediaradar/data/api-keys"
+        vault.hashicorp.com/agent-inject-template-app-config: |
+          {{- with secret "mediaradar/data/api-keys" -}}
+          export TMDB_API_KEY="{{ .Data.data.TMDB_API_KEY }}"
+          export TMDB_ACCESS_TOKEN="{{ .Data.data.TMDB_ACCESS_TOKEN }}"
+          export OMDB_API_KEY="{{ .Data.data.OMDB_API_KEY }}"
+          {{- end }}
+        # vault.hashicorp.com/agent-inject-secret-config: 'secret/mediaradar-svc/api-keys'
+        # vault.hashicorp.com/agent-inject-template-config: |
+        #   {{- with secret "internal/database/config" -}}
+        #     export HELLO="{{ .Data.data.username }}"
+        #   {{- end }}
       labels:
         helm.sh/chart: k8s-0.1.0
         app.kubernetes.io/name: k8s
@@ -84,6 +102,19 @@ spec:
           securityContext:
             {}
           image: "registry.cgraaaj.in/media-radar/media-radar-svc:73f8740"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Sourcing Vault secrets ==="
+              set -a  # automatically export all sourced vars
+              source /vault/secrets/creds.env
+              source /vault/secrets/app-config
+              set +a
+              echo "=== Current env vars ==="
+              printenv | grep -E 'REDIS|TMDB|OMDB|DB_|USERNAME|PASSWORD'
+              echo "=== Starting app ==="
+              exec npm start
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -99,7 +130,7 @@ spec:
             - name: ALLOWED_ORIGINS
               value: "https://mediaradar.cgraaaj.in,http://localhost:3000"
             - name: REDIS_HOST
-              value: "redis-service"
+              value: "192.168.1.72"
             - name: REDIS_PORT
               value: "6379"
             - name: TMDB_BASE_URL

@@ -104,24 +104,31 @@ vault:
   inject:
     # name => Vault secret relative path (to vault.path) or absolute path
     # Env vars expected by the app:
-    env:
-      TMDB_API_KEY: "api-keys/secondary_key"
-      TMDB_ACCESS_TOKEN: "api/secondary_token"
-      OMDB_API_KEY: "api-keys/primary_key"
-      REDIS_USERNAME: "database/creds/redis-readonly/username"
-      REDIS_PASSWORD: "database/creds/redis-readonly/password"
+    env: {}
     # name => Vault secret path (for file injection)
     secrets: {}
     # name => template body (for custom rendered files)
     templates:
-      # REDIS_USERNAME: |
-      #   {{- with secret "database/creds/redis-readonly" -}}
-      #   {{ .Data.username }}
-      #   {{- end }}
-      # REDIS_PASSWORD: |
-      #   {{- with secret "database/creds/redis-readonly" -}}
-      #   {{ .Data.password }}
-      #   {{- end }}
+      TMDB_API_KEY: |
+        {{- with secret "mediaradar/data/api-keys" -}}
+        {{ .Data.TMDB_API_KEY }}
+        {{- end }}
+      TMDB_ACCESS_TOKEN: |
+        {{- with secret "mediaradar/data/api-keys" -}}
+        {{ .Data.TMDB_ACCESS_TOKEN }}
+        {{- end }}
+      OMDB_API_KEY: |
+        {{- with secret "mediaradar/data/api-keys" -}}
+        {{ .Data.OMDB_API_KEY }}
+        {{- end }}
+      REDIS_USERNAME: |
+        {{- with secret "database/creds/redis-readonly" -}}
+        {{ .Data.username }}
+        {{- end }}
+      REDIS_PASSWORD: |
+        {{- with secret "database/creds/redis-readonly" -}}
+        {{ .Data.password }}
+        {{- end }}
   # Optional: direct env variables (values may include Vault template strings if desired)
   env: {}
 
