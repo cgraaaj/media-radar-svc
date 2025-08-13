@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "media-radar-svc-k8s.fullname" . }}
+  name: {{ include "k8s.fullname" . }}
   labels:
-    {{- include "media-radar-svc-k8s.labels" . | nindent 4 }}
+    {{- include "k8s.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "media-radar-svc-k8s.selectorLabels" . | nindent 6 }}
+      {{- include "k8s.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -19,33 +19,39 @@ spec:
         {{- end }}
         {{- if .Values.vault.enabled }}
         vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/agent-inject-status: "update"
         vault.hashicorp.com/agent-inject-token: "true"
-        vault.hashicorp.com/role: "{{ .Values.vault.auth.role }}"
-        vault.hashicorp.com/secret-volume-path: "{{ .Values.vault.secretVolumePath | default "/vault/secrets" }}"
-        {{- with .Values.vault.agent }}
-        {{- with .limits }}
-        vault.hashicorp.com/agent-limits-cpu: "{{ .cpu }}"
-        vault.hashicorp.com/agent-limits-mem: "{{ .memory }}"
+        vault.hashicorp.com/auth-path: {{ .Values.vault.auth.mountPath | quote }}
+        vault.hashicorp.com/role: {{ .Values.vault.auth.role | quote }}
+        vault.hashicorp.com/secret-volume-path: {{ .Values.vault.secretVolumePath | default "/vault/secrets" | quote }}
+        {{- if .Values.vault.agent.limits }}
+        vault.hashicorp.com/agent-limits-cpu: {{ .Values.vault.agent.limits.cpu | quote }}
+        vault.hashicorp.com/agent-limits-mem: {{ .Values.vault.agent.limits.memory | quote }}
         {{- end }}
-        {{- with .requests }}
-        vault.hashicorp.com/agent-requests-cpu: "{{ .cpu }}"
-        vault.hashicorp.com/agent-requests-mem: "{{ .memory }}"
+        {{- if .Values.vault.agent.requests }}
+        vault.hashicorp.com/agent-requests-cpu: {{ .Values.vault.agent.requests.cpu | quote }}
+        vault.hashicorp.com/agent-requests-mem: {{ .Values.vault.agent.requests.memory | quote }}
         {{- end }}
-        {{- end }}
-        {{- range $name, $path := .Values.vault.inject.secrets }}
-        vault.hashicorp.com/agent-inject-secret-{{ $name }}: "{{ $path }}"
-        {{- end }}
+        {{- if .Values.vault.inject.env }}
         {{- range $name, $path := .Values.vault.inject.env }}
-        vault.hashicorp.com/agent-inject-env-{{ $name }}: "{{ $path }}"
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) }}
+        vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ $path | quote }}
+        {{- else }}
+        vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}
         {{- end }}
-        {{- range $name, $template := .Values.vault.inject.templates }}
-        vault.hashicorp.com/agent-inject-template-{{ $name }}: |
-{{ $template | nindent 10 }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.vault.inject.secrets }}
+        {{- range $name, $path := .Values.vault.inject.secrets }}
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) }}
+        vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ $path | quote }}
+        {{- else }}
+        vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- end }}
       labels:
-        {{- include "media-radar-svc-k8s.labels" . | nindent 8 }}
+        {{- include "k8s.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -54,7 +60,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "media-radar-svc-k8s.serviceAccountName" . }}
+      serviceAccountName: {{ include "k8s.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -67,6 +73,31 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+          {{- with .Values.env }}
+          env:
+            - name: NODE_ENV
+              value: {{ .nodeEnv | quote }}
+            - name: HOST
+              value: {{ .host | quote }}
+            - name: FRONTEND_URL
+              value: {{ .frontendUrl | quote }}
+            - name: ALLOWED_ORIGINS
+              value: {{ .allowedOrigins | quote }}
+            - name: REDIS_HOST
+              value: {{ .redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .redis.port | quote }}
+            - name: TMDB_BASE_URL
+              value: {{ .tmdb.baseUrl | quote }}
+            - name: TMDB_IMAGE_BASE_URL
+              value: {{ .tmdb.imageBaseUrl | quote }}
+            - name: OMDB_BASE_URL
+              value: {{ .omdb.baseUrl | quote }}
+            - name: DEFAULT_MOVIES_POSTER
+              value: {{ .defaults.moviesPoster | quote }}
+            - name: DEFAULT_TVSHOWS_POSTER
+              value: {{ .defaults.tvshowsPoster | quote }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -76,13 +107,6 @@ spec:
           {{- with .Values.volumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- with .Values.vault.env }}
-          env:
-            {{- range $name, $value := . }}
-            - name: {{ $name }}
-              value: {{ $value | quote }}
-            {{- end }}
           {{- end }}
       {{- with .Values.volumes }}
       volumes:

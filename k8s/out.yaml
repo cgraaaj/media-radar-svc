@@ -1,0 +1,145 @@
+---
+# Source: k8s/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mediaradar-svc-sa
+  labels:
+    helm.sh/chart: k8s-0.1.0
+    app.kubernetes.io/name: k8s
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: true
+---
+# Source: k8s/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: release-name-k8s
+  labels:
+    helm.sh/chart: k8s-0.1.0
+    app.kubernetes.io/name: k8s
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: k8s
+    app.kubernetes.io/instance: release-name
+---
+# Source: k8s/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: release-name-k8s
+  labels:
+    helm.sh/chart: k8s-0.1.0
+    app.kubernetes.io/name: k8s
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8s
+      app.kubernetes.io/instance: release-name
+  template:
+    metadata:
+      annotations:
+        vault.hashicorp.com/service-account-token-expiration: "3600"
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/agent-inject-token: "true"
+        vault.hashicorp.com/auth-path: "kubernetes"
+        vault.hashicorp.com/role: "mediaradar-svc-role"
+        vault.hashicorp.com/secret-volume-path: "/vault/secrets"
+        vault.hashicorp.com/agent-limits-cpu: "100m"
+        vault.hashicorp.com/agent-limits-mem: "128Mi"
+        vault.hashicorp.com/agent-requests-cpu: "10m"
+        vault.hashicorp.com/agent-requests-mem: "64Mi"
+        vault.hashicorp.com/agent-inject-env-OMDB_API_KEY: "secret/mediaradar-svc/api-keys/primary_key"
+        vault.hashicorp.com/agent-inject-env-REDIS_PASSWORD: "database/creds/redis-readonly/password"
+        vault.hashicorp.com/agent-inject-env-REDIS_USERNAME: "database/creds/redis-readonly/username"
+        vault.hashicorp.com/agent-inject-env-TMDB_ACCESS_TOKEN: "secret/mediaradar-svc/api/secondary_token"
+        vault.hashicorp.com/agent-inject-env-TMDB_API_KEY: "secret/mediaradar-svc/api-keys/secondary_key"
+      labels:
+        helm.sh/chart: k8s-0.1.0
+        app.kubernetes.io/name: k8s
+        app.kubernetes.io/instance: release-name
+        app.kubernetes.io/version: "1.16.0"
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      serviceAccountName: mediaradar-svc-sa
+      securityContext:
+        {}
+      containers:
+        - name: k8s
+          securityContext:
+            {}
+          image: "registry.cgraaaj.in/media-radar/media-radar-svc:73f8740"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: FRONTEND_URL
+              value: "https://mediaradar.cgraaaj.in"
+            - name: ALLOWED_ORIGINS
+              value: "https://mediaradar.cgraaaj.in,http://localhost:3000"
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: TMDB_BASE_URL
+              value: "https://api.themoviedb.org/3"
+            - name: TMDB_IMAGE_BASE_URL
+              value: "https://image.tmdb.org/t/p/w500"
+            - name: OMDB_BASE_URL
+              value: "http://www.omdbapi.com/"
+            - name: DEFAULT_MOVIES_POSTER
+              value: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=🎬"
+            - name: DEFAULT_TVSHOWS_POSTER
+              value: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=📺"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {}
+---
+# Source: k8s/templates/tests/test-connection.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "release-name-k8s-test-connection"
+  labels:
+    helm.sh/chart: k8s-0.1.0
+    app.kubernetes.io/name: k8s
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.16.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox
+      command: ['wget']
+      args: ['release-name-k8s:5000']
+  restartPolicy: Never

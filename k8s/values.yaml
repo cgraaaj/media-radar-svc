@@ -29,13 +29,11 @@ serviceAccount:
   annotations: {}
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
-  name: "media-radar-svc"
+  name: "mediaradar-svc-sa"
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/ 
 podAnnotations:
-  vault.hashicorp.com/auth-path: kubernetes
-  vault.hashicorp.com/service-account-token-audience: "vault"
   vault.hashicorp.com/service-account-token-expiration: "3600"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
@@ -85,11 +83,10 @@ ingressRoute:
 # Enable Vault Agent Injector for secret management
 vault:
   enabled: true
-  path: "media-radar"
-  version: "v2"
+  path: "mediaradar-svc"
   auth:
     mountPath: "kubernetes"
-    role: "media-radar-dev-role"
+    role: "mediaradar-svc-role"
   agent:
     limits:
       cpu: "100m"
@@ -105,12 +102,26 @@ vault:
   addVolumeMount: false
   # Configure what to inject via annotations
   inject:
+    # name => Vault secret relative path (to vault.path) or absolute path
+    # Env vars expected by the app:
+    env:
+      TMDB_API_KEY: "api-keys/secondary_key"
+      TMDB_ACCESS_TOKEN: "api/secondary_token"
+      OMDB_API_KEY: "api-keys/primary_key"
+      REDIS_USERNAME: "database/creds/redis-readonly/username"
+      REDIS_PASSWORD: "database/creds/redis-readonly/password"
     # name => Vault secret path (for file injection)
     secrets: {}
-    # name => Vault secret path (for env injection)
-    env: {}
     # name => template body (for custom rendered files)
-    templates: {}
+    templates:
+      # REDIS_USERNAME: |
+      #   {{- with secret "database/creds/redis-readonly" -}}
+      #   {{ .Data.username }}
+      #   {{- end }}
+      # REDIS_PASSWORD: |
+      #   {{- with secret "database/creds/redis-readonly" -}}
+      #   {{ .Data.password }}
+      #   {{- end }}
   # Optional: direct env variables (values may include Vault template strings if desired)
   env: {}
 

@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "media-radar-svc-k8s.fullname" . }}
+  name: {{ include "k8s.fullname" . }}
   labels:
-    {{- include "media-radar-svc-k8s.labels" . | nindent 4 }}
+    {{- include "k8s.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -35,7 +35,7 @@ spec:
             {{- end }}
             backend:
               service:
-                name: {{ include "media-radar-svc-k8s.fullname" $ }}
+                name: {{ include "k8s.fullname" $ }}
                 port:
                   number: {{ $.Values.service.port }}
           {{- end }}
