@@ -19,9 +19,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.enabled }}
         vault.hashicorp.com/agent-inject: "true"
-        {{- if .Values.vault.auth.mountPath }}
-        vault.hashicorp.com/auth-path: {{ .Values.vault.auth.mountPath | quote }}
-        {{- end }}
+
         vault.hashicorp.com/role: {{ .Values.vault.auth.role | quote }}
         {{- if .Values.vault.agent.limits }}
         vault.hashicorp.com/agent-limits-cpu: {{ .Values.vault.agent.limits.cpu | quote }}

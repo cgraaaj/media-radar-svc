@@ -85,7 +85,6 @@ vault:
   enabled: true
   path: "mediaradar-svc"
   auth:
-    mountPath: "kubernetes"
     role: "mediaradar-svc-role"
   agent:
     limits:
