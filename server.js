@@ -3,7 +3,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 // Import modules
-const { isConnected } = require('./config/database');
+const { isConnected, redisClient } = require('./config/database');
 const movieRoutes = require('./routes/movieRoutes');
 const tvShowRoutes = require('./routes/tvShowRoutes');
 const analysisRoutes = require('./routes/analysisRoutes');
@@ -102,7 +102,12 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   console.log(`🎬 Optimized Movie API Server running on http://${HOST}:${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📊 Redis status: ${isConnected() ? '✅ Connected' : '❌ Disconnected'}`);
+  // Print initial status and keep it accurate with client events
+  console.log(`📊 Redis status: ${isConnected() ? '✅ Connected' : '⌛ Connecting...'}`);
+  if (redisClient) {
+    redisClient.on('ready', () => console.log('📊 Redis status: ✅ Connected'));
+    redisClient.on('end', () => console.log('📊 Redis status: ❌ Disconnected'));
+  }
   console.log(`🔗 CORS Origins: ${allowedOrigins.join(', ')}`);
   console.log(`🧩 Architecture: Modular (vs. previous monolithic)`);
   console.log(`📁 Modules: Config, Services, Helpers, Routes`);

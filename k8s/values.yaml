@@ -104,33 +104,34 @@ vault:
   inject:
     # name => Vault secret relative path (to vault.path) or absolute path
     # Env vars expected by the app:
-    env: {}
+    env:
+      app-config: "mediaradar/data/api-keys"
     # name => Vault secret path (for file injection)
-    secrets: {}
+    secrets:
+      creds.env: "database/creds/redis-readonly"
     # name => template body (for custom rendered files)
     templates:
-      TMDB_API_KEY: |
-        {{- with secret "mediaradar/data/api-keys" -}}
-        {{ .Data.TMDB_API_KEY }}
-        {{- end }}
-      TMDB_ACCESS_TOKEN: |
-        {{- with secret "mediaradar/data/api-keys" -}}
-        {{ .Data.TMDB_ACCESS_TOKEN }}
-        {{- end }}
-      OMDB_API_KEY: |
-        {{- with secret "mediaradar/data/api-keys" -}}
-        {{ .Data.OMDB_API_KEY }}
-        {{- end }}
-      REDIS_USERNAME: |
+      creds.env: |
         {{- with secret "database/creds/redis-readonly" -}}
-        {{ .Data.username }}
+        export REDIS_USERNAME="{{ .Data.username }}"
+        export REDIS_PASSWORD="{{ .Data.password }}"
         {{- end }}
-      REDIS_PASSWORD: |
-        {{- with secret "database/creds/redis-readonly" -}}
-        {{ .Data.password }}
+      app-config: |
+        {{- with secret "mediaradar/data/api-keys" -}}
+        export TMDB_API_KEY="{{ .Data.data.TMDB_API_KEY }}"
+        export TMDB_ACCESS_TOKEN="{{ .Data.data.TMDB_ACCESS_TOKEN }}"
+        export OMDB_API_KEY="{{ .Data.data.OMDB_API_KEY }}"
         {{- end }}
   # Optional: direct env variables (values may include Vault template strings if desired)
   env: {}
+
+# Runtime config: source Vault-injected files before starting app
+runtime:
+  sourceInjectedFiles:
+    enabled: true
+    files:
+      - "creds.env"
+      - "app-config"
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -190,6 +191,9 @@ env:
   host: "0.0.0.0"
   frontendUrl: "https://mediaradar.cgraaaj.in"
   allowedOrigins: "https://mediaradar.cgraaaj.in,http://localhost:3000"
+
+  # Runtime Environment
+  runtimeEnv: "k8s"
   
   # Redis Configuration (non-sensitive values only)
   redis:

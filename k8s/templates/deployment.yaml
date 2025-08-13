@@ -19,10 +19,10 @@ spec:
         {{- end }}
         {{- if .Values.vault.enabled }}
         vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/agent-inject-token: "true"
+        {{- if .Values.vault.auth.mountPath }}
         vault.hashicorp.com/auth-path: {{ .Values.vault.auth.mountPath | quote }}
+        {{- end }}
         vault.hashicorp.com/role: {{ .Values.vault.auth.role | quote }}
-        vault.hashicorp.com/secret-volume-path: {{ .Values.vault.secretVolumePath | default "/vault/secrets" | quote }}
         {{- if .Values.vault.agent.limits }}
         vault.hashicorp.com/agent-limits-cpu: {{ .Values.vault.agent.limits.cpu | quote }}
         vault.hashicorp.com/agent-limits-mem: {{ .Values.vault.agent.limits.memory | quote }}
@@ -33,7 +33,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.inject.env }}
         {{- range $name, $path := .Values.vault.inject.env }}
-        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) }}
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "mediaradar/" $path) }}
         vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ $path | quote }}
         {{- else }}
         vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}
@@ -42,7 +42,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.inject.secrets }}
         {{- range $name, $path := .Values.vault.inject.secrets }}
-        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) }}
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "mediaradar/" $path) }}
         vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ $path | quote }}
         {{- else }}
         vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}
@@ -75,6 +75,20 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if and .Values.runtime.sourceInjectedFiles.enabled .Values.runtime.sourceInjectedFiles.files }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Sourcing Vault secrets ==="
+              set -a
+              {{- range $f := .Values.runtime.sourceInjectedFiles.files }}
+              [ -f "/vault/secrets/{{ $f }}" ] && source "/vault/secrets/{{ $f }}" || true
+              {{- end }}
+              set +a
+              echo "=== Starting app ==="
+              exec npm start
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
@@ -103,6 +117,8 @@ spec:
               value: {{ .defaults.moviesPoster | quote }}
             - name: DEFAULT_TVSHOWS_POSTER
               value: {{ .defaults.tvshowsPoster | quote }}
+            - name: RUNTIME_ENV
+              value: {{ .runtimeEnv | quote }}
           {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
