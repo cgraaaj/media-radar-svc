@@ -101,7 +101,7 @@ spec:
         - name: k8s
           securityContext:
             {}
-          image: "registry.cgraaaj.in/media-radar/media-radar-svc:73f8740"
+          image: "registry.cgraaaj.in/media-radar/media-radar-svc:b84ffad"
           command: ["sh", "-c"]
           args:
             - |
@@ -143,6 +143,8 @@ spec:
               value: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=🎬"
             - name: DEFAULT_TVSHOWS_POSTER
               value: "https://via.placeholder.com/300x450/2a2a2a/ffffff?text=📺"
+            - name: RUNTIME_ENV
+              value: "k8s"
           livenessProbe:
             httpGet:
               path: /
