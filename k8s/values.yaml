@@ -71,8 +71,6 @@ ingressRoute:
   routes:
     - match: Host(`mediaradar.cgraaaj.in`) && PathPrefix(`/api`)
       kind: Rule
-      middlewares:
-        - name: api-stripprefix
       services:
         - name: mediaradar-svc-k8s
           port: 5000
@@ -112,8 +110,8 @@ vault:
     templates:
       creds.env: |
         {{- with secret "database/creds/redis-readonly" -}}
-        export REDIS_USERNAME="{{ .Data.username }}"
-        export REDIS_PASSWORD="{{ .Data.password }}"
+        REDIS_USERNAME="{{ .Data.username }}"
+        REDIS_PASSWORD="{{ .Data.password }}"
         {{- end }}
       app-config: |
         {{- with secret "mediaradar/data/api-keys" -}}
