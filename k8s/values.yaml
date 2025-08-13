@@ -196,7 +196,7 @@ env:
   
   # Redis Configuration (non-sensitive values only)
   redis:
-    host: "redis-service"  # Update with your actual Redis service name
+    host: "192.168.1.72"  # Update with your actual Redis service name
     port: "6379"
     # password is fetched from Vault, not needed here
   
