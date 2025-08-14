@@ -5,6 +5,9 @@ const MovieController = require('../controllers/MovieController');
 // Get movies with pagination
 router.get('/', MovieController.getMovies.bind(MovieController));
 
+// Search movies with pagination
+router.get('/search', MovieController.searchMovies.bind(MovieController));
+
 // Get specific movie details
 router.get('/:id', MovieController.getMovieById.bind(MovieController));
 

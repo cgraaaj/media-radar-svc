@@ -29,7 +29,31 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors({ origin: allowedOrigins, credentials: true }));
+// Enhanced CORS configuration for development
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow localhost on any port for development
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    
+    // Check against allowed origins
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    logger.warn('CORS blocked origin:', origin);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-request-id']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 logger.info('Server modules loaded successfully');

@@ -77,6 +77,53 @@ class MovieController {
     }
   }
 
+  // Search movies with pagination
+  async searchMovies(req, res) {
+    try {
+      const query = req.query.q || '';
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      
+      console.log(`🔍 Movie search request - Query: "${query}", Page: ${page}, Limit: ${limit}`);
+      
+      const startTime = Date.now();
+      const result = await MediaModel.searchMedia('movies', query, page, limit);
+      
+      const transformedMovies = await MediaService.transformMediaEntries(
+        result.entries, 
+        (page - 1) * limit, 
+        'movie'
+      );
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`⚡ Total movie search processing time: ${totalTime}ms`);
+      console.log(`🎉 Found ${transformedMovies.length} movies matching "${query}" for page ${page}`);
+      
+      res.json({
+        movies: transformedMovies,
+        pagination: {
+          ...result.pagination,
+          totalMovies: result.pagination.totalItems,
+          moviesPerPage: result.pagination.itemsPerPage
+        },
+        search: result.search,
+        metadata: {
+          ...result.metadata,
+          processingTimeMs: totalTime
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error in MovieController.searchMovies:', error);
+      
+      if (error.message.includes('Redis')) {
+        return res.status(503).json({ error: 'Database connection failed', details: error.message });
+      }
+      
+      res.status(500).json({ error: 'Failed to search movies', details: error.message });
+    }
+  }
+
   // Get specific movie details
   async getMovieById(req, res) {
     try {

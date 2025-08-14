@@ -79,6 +79,53 @@ class TVShowController {
     }
   }
 
+  // Search TV shows with pagination
+  async searchTVShows(req, res) {
+    try {
+      const query = req.query.q || '';
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      
+      console.log(`🔍 TV show search request - Query: "${query}", Page: ${page}, Limit: ${limit}`);
+      
+      const startTime = Date.now();
+      const result = await MediaModel.searchMedia('tvshows', query, page, limit);
+      
+      const transformedTVShows = await MediaService.transformMediaEntries(
+        result.entries, 
+        (page - 1) * limit, 
+        'tvshow'
+      );
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`⚡ Total TV show search processing time: ${totalTime}ms`);
+      console.log(`🎉 Found ${transformedTVShows.length} TV shows matching "${query}" for page ${page}`);
+      
+      res.json({
+        tvShows: transformedTVShows,
+        pagination: {
+          ...result.pagination,
+          totalTVShows: result.pagination.totalItems,
+          tvShowsPerPage: result.pagination.itemsPerPage
+        },
+        search: result.search,
+        metadata: {
+          ...result.metadata,
+          processingTimeMs: totalTime
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error in TVShowController.searchTVShows:', error);
+      
+      if (error.message.includes('Redis')) {
+        return res.status(503).json({ error: 'Database connection failed', details: error.message });
+      }
+      
+      res.status(500).json({ error: 'Failed to search TV shows', details: error.message });
+    }
+  }
+
   // Get specific TV show details
   async getTVShowById(req, res) {
     try {

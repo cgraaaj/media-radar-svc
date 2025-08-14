@@ -91,6 +91,72 @@ class MediaModel {
     };
   }
 
+  async searchMedia(type, query, page = 1, limit = 20) {
+    const { entries } = await this.getMediaByType(type, 1, 10000); // Get all for filtering
+    const offset = (page - 1) * limit;
+    
+    if (!query || query.trim() === '') {
+      // If no query, return regular paginated results
+      return this.getMediaByType(type, page, limit);
+    }
+
+    const searchTerm = query.toLowerCase().trim();
+    
+    const filteredEntries = entries.filter(([key, qualityData]) => {
+      // Search in title/key
+      const titleMatch = key.toLowerCase().includes(searchTerm);
+      
+      // Search in filenames and metadata
+      const fileMatch = Object.values(qualityData || {}).some(files =>
+        Array.isArray(files) && files.some(file => {
+          if (!file || typeof file !== 'object') return false;
+          
+          try {
+            const filename = (file.filename || '').toString().toLowerCase();
+            const originalFilename = (file.originalFilename || '').toString().toLowerCase();
+            const language = (file.language || '').toString().toLowerCase();
+            const releaseYear = (file.releaseYear || '').toString().toLowerCase();
+            
+            return filename.includes(searchTerm) || 
+                   originalFilename.includes(searchTerm) ||
+                   language.includes(searchTerm) ||
+                   releaseYear.includes(searchTerm);
+          } catch (e) {
+            // If any error occurs during string conversion, skip this file
+            return false;
+          }
+        })
+      );
+      
+      return titleMatch || fileMatch;
+    });
+    
+    const totalFiltered = filteredEntries.length;
+    const paginatedEntries = filteredEntries.slice(offset, offset + limit);
+    
+    return {
+      entries: paginatedEntries,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalFiltered / limit),
+        totalItems: totalFiltered,
+        itemsPerPage: limit,
+        hasNextPage: page < Math.ceil(totalFiltered / limit),
+        hasPrevPage: page > 1
+      },
+      search: {
+        query: query,
+        totalFound: totalFiltered,
+        searchTerm: searchTerm
+      },
+      metadata: {
+        dataStructure: 'search_filtered',
+        totalInRedis: entries.length,
+        filteredCount: totalFiltered
+      }
+    };
+  }
+
   async getMediaById(type, id) {
     const { entries } = await this.getMediaByType(type, 1, 1000); // Get all to find by ID
     
@@ -136,8 +202,13 @@ class MediaModel {
     const filteredEntries = entries.filter(([key, qualityData]) => {
       return Object.values(qualityData).some(files => 
         Array.isArray(files) && files.some(file => {
-          const fileLanguage = file.language || '';
-          return fileLanguage.toLowerCase().includes(language.toLowerCase());
+          if (!file || typeof file !== 'object') return false;
+          try {
+            const fileLanguage = (file.language || '').toString();
+            return fileLanguage.toLowerCase().includes(language.toLowerCase());
+          } catch (e) {
+            return false;
+          }
         })
       );
     });
