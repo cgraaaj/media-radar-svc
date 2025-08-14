@@ -82,7 +82,7 @@ ingressRoute:
 vault:
   enabled: true
   path: "kv-v2"
-  addr: "http://vault-agent-injector.hashicorp.svc.cluster.local:8200"
+  addr: "http://hashicorpvault-agent-injector.hashicorp.svc.cluster.local:8200"
   auth:
     role: "mediaradar-svc-role"
   agent:
