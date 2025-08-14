@@ -1,16 +1,16 @@
-const { redisClient, isConnected } = require('../config/database');
+const db = require('../config/database');
 
 class MediaModel {
   constructor() {
-    this.cacheKey = 'media_radar_cache';
+    this.cacheKey = process.env.REDIS_CACHE_KEY || 'media_radar_cache';
   }
 
   async getAllMedia() {
-    if (!isConnected()) {
+    if (!db.isConnected()) {
       throw new Error('Redis is not connected');
     }
 
-    const cachedData = await redisClient.get(this.cacheKey);
+    const cachedData = await db.redisClient.get(this.cacheKey);
     if (!cachedData) {
       throw new Error('No media data found in cache');
     }
