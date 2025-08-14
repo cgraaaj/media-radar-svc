@@ -10,7 +10,7 @@ router.get('/redis-structure', async (req, res) => {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const rawData = await redisClient.get('onetamilmv_movies_cache');
+    const rawData = await redisClient.get('media_radar_cache');
     if (!rawData) {
       return res.status(404).json({ error: 'No data found in Redis' });
     }
@@ -180,7 +180,7 @@ router.get('/available-languages', async (req, res) => {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const cachedMovies = await redisClient.get('onetamilmv_movies_cache');
+    const cachedMovies = await redisClient.get('media_radar_cache');
     if (!cachedMovies) {
       return res.status(404).json({ error: 'No movies found in cache' });
     }
@@ -235,7 +235,7 @@ router.get('/debug-redis', async (req, res) => {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const rawData = await redisClient.get('onetamilmv_movies_cache');
+    const rawData = await redisClient.get('media_radar_cache');
     if (rawData) {
       try {
         const parsedData = JSON.parse(rawData);

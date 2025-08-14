@@ -7,6 +7,8 @@ const { isConnected, redisClient } = require('./config/database');
 const movieRoutes = require('./routes/movieRoutes');
 const tvShowRoutes = require('./routes/tvShowRoutes');
 const analysisRoutes = require('./routes/analysisRoutes');
+const logger = require('./config/logger');
+const { randomUUID } = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -16,54 +18,33 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',') 
   : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.1.72:3000'];
 
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
-}));
+// Request ID + basic access log
+app.use((req, res, next) => {
+  req.id = req.headers['x-request-id'] || randomUUID();
+  res.setHeader('x-request-id', req.id);
+  const start = Date.now();
+  res.on('finish', () => {
+    logger.info('http', { id: req.id, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Date.now() - start });
+  });
+  next();
+});
+
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json());
 
-console.log('🚀 Server modules loaded successfully');
+logger.info('Server modules loaded successfully');
 
 // Routes
 app.use('/api/movies', movieRoutes);
 app.use('/api/tvshows', tvShowRoutes);
 app.use('/api/analyze', analysisRoutes);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Optimized Movie API is running',
-    redis: isConnected() ? 'Connected' : 'Disconnected',
-    architecture: 'Modular',
-    modules: ['config/database', 'services/movieService', 'helpers/utils', 'routes/*']
-  });
+// Health endpoints
+app.get('/healthz', (req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
 });
-
-// Redis status endpoint
-app.get('/api/redis-status', async (req, res) => {
-  try {
-    if (isConnected()) {
-      const { redisClient } = require('./config/database');
-      const keys = await redisClient.keys('*');
-      res.json({
-        connected: true,
-        keys: keys,
-        targetKey: 'onetamilmv_movies_cache',
-        hasTargetKey: keys.includes('onetamilmv_movies_cache')
-      });
-    } else {
-      res.json({
-        connected: false,
-        message: 'Redis is not connected'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({
-      connected: false,
-      error: error.message
-    });
-  }
+app.get('/readyz', (req, res) => {
+  res.json({ status: isConnected() ? 'ready' : 'not-ready', redis: isConnected() });
 });
 
 // Root endpoint
@@ -72,43 +53,41 @@ app.get('/', (req, res) => {
     message: 'Optimized Movie API Server',
     version: '2.0',
     architecture: 'Modular',
-    endpoints: {
-      movies: '/api/movies',
-      analysis: '/api/analyze',
-      health: '/api/health'
-    }
+    endpoints: { movies: '/api/movies', analysis: '/api/analyze', health: '/healthz', ready: '/readyz' }
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: err.message
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    available: ['/api/movies', '/api/analyze', '/api/health']
-  });
+  logger.error('Unhandled error', { id: req.id, error: err.message, stack: err.stack });
+  res.status(500).json({ error: 'Internal server error', message: err.message, id: req.id });
 });
 
 const HOST = process.env.HOST || '0.0.0.0';
-
-app.listen(PORT, HOST, () => {
-  console.log(`🎬 Optimized Movie API Server running on http://${HOST}:${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  // Print initial status and keep it accurate with client events
-  console.log(`📊 Redis status: ${isConnected() ? '✅ Connected' : '⌛ Connecting...'}`);
+const server = app.listen(PORT, HOST, () => {
+  logger.info(`Server running`, { url: `http://${HOST}:${PORT}`, env: process.env.NODE_ENV || 'development' });
+  logger.info('Redis status', { connected: isConnected() });
   if (redisClient) {
-    redisClient.on('ready', () => console.log('📊 Redis status: ✅ Connected'));
-    redisClient.on('end', () => console.log('📊 Redis status: ❌ Disconnected'));
+    redisClient.on('ready', () => logger.info('Redis status', { connected: true }));
+    redisClient.on('end', () => logger.info('Redis status', { connected: false }));
   }
-  console.log(`🔗 CORS Origins: ${allowedOrigins.join(', ')}`);
-  console.log(`🧩 Architecture: Modular (vs. previous monolithic)`);
-  console.log(`📁 Modules: Config, Services, Helpers, Routes`);
-}); 
+  logger.info('CORS Origins', { origins: allowedOrigins });
+});
+
+// Graceful shutdown
+async function shutdown(signal) {
+  try {
+    logger.warn('Shutting down', { signal });
+    server.close(() => logger.info('HTTP server closed'));
+    if (redisClient) {
+      try { await redisClient.quit(); } catch { try { await redisClient.disconnect(); } catch {} }
+      logger.info('Redis client closed');
+    }
+  } catch (e) {
+    logger.error('Shutdown error', { error: e.message });
+  } finally {
+    process.exit(0);
+  }
+}
+
+['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => shutdown(sig))); 
