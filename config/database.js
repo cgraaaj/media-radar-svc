@@ -39,12 +39,11 @@ function buildCreds() {
 
 let redisClient = null;
 let reconnectTimer = null;
+let reconnectingNow = false;
 
 async function connectWithFreshCreds() {
-  // Read creds at (re)connect time
   const creds = buildCreds();
 
-  // Dispose previous client if any
   if (redisClient) {
     try { await redisClient.quit(); } catch (_) { try { await redisClient.disconnect(); } catch (_) {} }
     redisClient = null;
@@ -54,7 +53,6 @@ async function connectWithFreshCreds() {
     socket: {
       host: process.env.REDIS_HOST,
       port: process.env.REDIS_PORT,
-      // Disable auto reconnect; we will rebuild with fresh creds
       reconnectStrategy: () => 0,
     },
     username: creds.REDIS_USERNAME,
@@ -62,14 +60,21 @@ async function connectWithFreshCreds() {
   });
 
   client.on('ready', () => console.log('Redis ready'));
-  client.on('error', (e) => console.error('Redis Client Error:', e.message));
   client.on('end', scheduleReconnect);
+  client.on('error', async (e) => {
+    console.error('Redis Client Error:', e.message);
+    const msg = (e && e.message) ? e.message.toLowerCase() : '';
+    // If creds are invalid/expired, force an immediate reconnect to re-read fresh creds
+    if (msg.includes('wrongpass') || msg.includes('noauth') || msg.includes('user is disabled')) {
+      await forceReconnectNow();
+    }
+  });
 
   await client.connect();
   redisClient = client;
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(delayMs = 1000) {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
@@ -78,9 +83,24 @@ function scheduleReconnect() {
       console.log('Redis reconnected with (possibly rotated) credentials');
     } catch (e) {
       console.error('Redis reconnect failed:', e.message);
-      scheduleReconnect();
+      scheduleReconnect(Math.min(delayMs * 2, 15000));
     }
-  }, 1000);
+  }, delayMs);
+}
+
+async function forceReconnectNow() {
+  if (reconnectingNow) return;
+  reconnectingNow = true;
+  try {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    await connectWithFreshCreds();
+    console.log('Redis force-reconnected after auth error');
+  } catch (e) {
+    console.error('Redis force-reconnect failed:', e.message);
+    scheduleReconnect(1000);
+  } finally {
+    reconnectingNow = false;
+  }
 }
 
 (async () => {
