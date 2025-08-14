@@ -19,7 +19,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.enabled }}
         vault.hashicorp.com/agent-inject: "true"
-
+        vault.hashicorp.com/agent-inject-vault-addr: {{ .Values.vault.addr | quote }}
         vault.hashicorp.com/role: {{ .Values.vault.auth.role | quote }}
         {{- if .Values.vault.agent.limits }}
         vault.hashicorp.com/agent-limits-cpu: {{ .Values.vault.agent.limits.cpu | quote }}
@@ -31,7 +31,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.inject.env }}
         {{- range $name, $path := .Values.vault.inject.env }}
-        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "mediaradar/" $path) }}
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "kv-v2/" $path) }}
         vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ $path | quote }}
         {{- else }}
         vault.hashicorp.com/agent-inject-env-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}
@@ -40,7 +40,7 @@ spec:
         {{- end }}
         {{- if .Values.vault.inject.secrets }}
         {{- range $name, $path := .Values.vault.inject.secrets }}
-        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "mediaradar/" $path) }}
+        {{- if or (hasPrefix "secret/" $path) (hasPrefix "database/" $path) (hasPrefix "kv-v2/" $path) }}
         vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ $path | quote }}
         {{- else }}
         vault.hashicorp.com/agent-inject-secret-{{ $name }}: {{ printf "secret/%s/%s" $.Values.vault.path $path | quote }}

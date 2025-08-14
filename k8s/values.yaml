@@ -81,7 +81,8 @@ ingressRoute:
 # Enable Vault Agent Injector for secret management
 vault:
   enabled: true
-  path: "mediaradar-svc"
+  path: "kv-v2"
+  addr: "http://vault-agent-injector.hashicorp.svc.cluster.local:8200"
   auth:
     role: "mediaradar-svc-role"
   agent:
@@ -102,7 +103,7 @@ vault:
     # name => Vault secret relative path (to vault.path) or absolute path
     # Env vars expected by the app:
     env:
-      app-config: "mediaradar/data/api-keys"
+      app-config: "kv-v2/data/mediaradar/api-keys"
     # name => Vault secret path (for file injection)
     secrets:
       creds.env: "database/creds/redis-readonly"
@@ -114,7 +115,7 @@ vault:
         REDIS_PASSWORD="{{ .Data.password }}"
         {{- end }}
       app-config: |
-        {{- with secret "mediaradar/data/api-keys" -}}
+        {{- with secret "kv-v2/data/mediaradar/api-keys" -}}
         export TMDB_API_KEY="{{ .Data.data.TMDB_API_KEY }}"
         export TMDB_ACCESS_TOKEN="{{ .Data.data.TMDB_ACCESS_TOKEN }}"
         export OMDB_API_KEY="{{ .Data.data.OMDB_API_KEY }}"
