@@ -1,4 +1,5 @@
 const AIService = require('../services/AIService');
+const JellyfinService = require('../services/JellyfinService');
 
 class AIController {
   // Get AI-powered movie suggestions
@@ -105,6 +106,82 @@ class AIController {
       });
     }
   }
+
+  // Get watch link for a specific movie
+  async getWatchLink(req, res) {
+    try {
+      const { movieName } = req.body;
+      
+      if (!movieName || !movieName.trim()) {
+        return res.status(400).json({
+          success: false,
+          error: 'Movie name is required',
+          message: 'Please provide a valid movie name.'
+        });
+      }
+
+      console.log(`🎬 Getting watch link for: "${movieName}"`);
+
+      // Search for the movie in Jellyfin
+      const searchResult = await JellyfinService.searchMovieInJellyfin(movieName);
+      console.log(`🔍 Jellyfin search result for "${movieName}":`, {
+        success: searchResult.success,
+        movieCount: searchResult.movies?.length || 0,
+        error: searchResult.error
+      });
+      
+      if (!searchResult.success) {
+        return res.json({
+          success: false,
+          message: searchResult.message || 'Movie not found in Jellyfin library',
+          error: searchResult.error,
+          available: false
+        });
+      }
+
+      // Find the best matching movie
+      const bestMatch = JellyfinService.findBestMatch(movieName, searchResult.movies);
+      
+      if (!bestMatch) {
+        return res.json({
+          success: false,
+          message: 'No suitable match found in Jellyfin library',
+          available: false
+        });
+      }
+
+      // Return simplified watch data for token-login approach
+      res.json({
+        success: true,
+        available: true,
+        movie: {
+          id: bestMatch.id,
+          name: bestMatch.name,
+          year: bestMatch.year,
+          overview: bestMatch.overview,
+          genres: bestMatch.genres,
+          rating: bestMatch.rating
+        },
+        watchData: {
+          server: JellyfinService.jellyfinServer,
+          movieId: bestMatch.id
+        },
+        message: `Found "${bestMatch.name}" in Jellyfin library`
+      });
+
+    } catch (error) {
+      console.error('Error in AIController.getWatchLink:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        message: 'An error occurred while getting the watch link.'
+      });
+    }
+  }
+
+
+
+
 }
 
 module.exports = new AIController(); 

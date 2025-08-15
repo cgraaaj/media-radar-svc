@@ -24,6 +24,7 @@ You will be given movie context and a user's question. Your job is to:
 3. Include relevant details like year, rating, genre, cast, or plot when available
 4. If the context doesn't contain enough information to answer the question, politely say "I don't have enough information about that in my movie database."
 5. Don't make up any information.
+6. The response should have the movie name in bold.
 
 Keep responses concise but informative, and always focus on movies and film-related content.`;
   }
