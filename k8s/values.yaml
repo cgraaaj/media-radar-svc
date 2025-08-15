@@ -119,6 +119,9 @@ vault:
         export TMDB_API_KEY="{{ .Data.data.TMDB_API_KEY }}"
         export TMDB_ACCESS_TOKEN="{{ .Data.data.TMDB_ACCESS_TOKEN }}"
         export OMDB_API_KEY="{{ .Data.data.OMDB_API_KEY }}"
+        export SUPABASE_URL="{{ .Data.data.SUPABASE_URL }}"
+        export SUPABASE_API_KEY="{{ .Data.data.SUPABASE_API_KEY }}"
+        export OPENAI_API_KEY="{{ .Data.data.OPENAI_API_KEY }}"
         {{- end }}
   # Optional: direct env variables (values may include Vault template strings if desired)
   env: {}
