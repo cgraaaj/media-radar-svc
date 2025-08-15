@@ -7,6 +7,7 @@ const { isConnected, redisClient } = require('./config/database');
 const movieRoutes = require('./routes/movieRoutes');
 const tvShowRoutes = require('./routes/tvShowRoutes');
 const analysisRoutes = require('./routes/analysisRoutes');
+const aiRoutes = require('./routes/aiRoutes');
 const logger = require('./config/logger');
 const { randomUUID } = require('crypto');
 
@@ -62,6 +63,7 @@ logger.info('Server modules loaded successfully');
 app.use('/api/movies', movieRoutes);
 app.use('/api/tvshows', tvShowRoutes);
 app.use('/api/analyze', analysisRoutes);
+app.use('/api/ai', aiRoutes);
 
 // Health endpoints
 app.get('/healthz', (req, res) => {
@@ -77,7 +79,14 @@ app.get('/', (req, res) => {
     message: 'Optimized Movie API Server',
     version: '2.0',
     architecture: 'Modular',
-    endpoints: { movies: '/api/movies', analysis: '/api/analyze', health: '/healthz', ready: '/readyz' }
+    endpoints: { 
+      movies: '/api/movies', 
+      tvshows: '/api/tvshows',
+      analysis: '/api/analyze', 
+      ai: '/api/ai',
+      health: '/healthz', 
+      ready: '/readyz' 
+    }
   });
 });
 
