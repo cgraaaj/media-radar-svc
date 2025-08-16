@@ -57,12 +57,20 @@ class JellyfinService {
     
     // Check if cached token is still valid
     if (cachedToken && expiry && Date.now() < expiry) {
+      console.log('✅ Using cached Jellyfin token');
       return cachedToken;
     }
     
     // Get new token
+    console.log('🔄 Getting new Jellyfin token...');
     const authResult = await this.authenticateUser();
-    return authResult.success ? authResult.token : null;
+    if (authResult.success) {
+      console.log('✅ New Jellyfin token obtained');
+      return authResult.token;
+    } else {
+      console.error('❌ Failed to get Jellyfin token:', authResult.error);
+      return null;
+    }
   }
 
   async searchMovieInJellyfin(movieName) {
