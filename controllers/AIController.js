@@ -77,6 +77,8 @@ class AIController {
     }
   }
 
+
+
   // Get example queries for the UI
   async getExampleQueries(req, res) {
     try {

@@ -12,8 +12,6 @@ class JellyfinService {
 
   async authenticateUser() {
     try {
-      console.log('🔐 Authenticating with Jellyfin...');
-      
       const response = await axios.post(`${this.authServer}/Users/AuthenticateByName`, {
         Username: "anonymous",
         Pw: "anonymous@jelly"
@@ -27,11 +25,9 @@ class JellyfinService {
       const { AccessToken, User } = response.data;
       
       if (AccessToken && User) {
-        // Cache token for 24 hours
+        // Cache token for 30 minutes to avoid conflicts with frontend auth
         this.tokenCache.set('anonymous', AccessToken);
-        this.tokenExpiry.set('anonymous', Date.now() + (24 * 60 * 60 * 1000));
-        
-        console.log('✅ Jellyfin authentication successful');
+        this.tokenExpiry.set('anonymous', Date.now() + (30 * 60 * 1000));
         return {
           success: true,
           token: AccessToken,
@@ -42,7 +38,6 @@ class JellyfinService {
         throw new Error('Invalid authentication response');
       }
     } catch (error) {
-      console.error('❌ Jellyfin authentication failed:', error.message);
       return {
         success: false,
         error: error.message,
@@ -57,30 +52,48 @@ class JellyfinService {
     
     // Check if cached token is still valid
     if (cachedToken && expiry && Date.now() < expiry) {
-      console.log('✅ Using cached Jellyfin token');
       return cachedToken;
     }
     
+    // Clear expired token
+    if (cachedToken) {
+      this.tokenCache.delete('anonymous');
+      this.tokenExpiry.delete('anonymous');
+    }
+    
     // Get new token
-    console.log('🔄 Getting new Jellyfin token...');
     const authResult = await this.authenticateUser();
-    if (authResult.success) {
-      console.log('✅ New Jellyfin token obtained');
-      return authResult.token;
-    } else {
-      console.error('❌ Failed to get Jellyfin token:', authResult.error);
-      return null;
+    return authResult.success ? authResult.token : null;
+  }
+
+  // Method to test if a token is still valid
+  async isTokenValid(token) {
+    try {
+      const response = await axios.get(`${this.jellyfinServer}/System/Info`, {
+        headers: {
+          'Authorization': `MediaBrowser Token=${token}`
+        }
+      });
+      return response.status === 200;
+    } catch (error) {
+      return false;
     }
   }
 
-  async searchMovieInJellyfin(movieName) {
+  // Method to manually clear token cache
+  clearTokenCache() {
+    this.tokenCache.clear();
+    this.tokenExpiry.clear();
+  }
+
+  async searchMovieInJellyfin(movieName, retryCount = 0) {
     try {
       const token = await this.getValidToken();
       if (!token) {
         throw new Error('Failed to authenticate with Jellyfin');
       }
 
-      console.log(`🔍 Searching for "${movieName}" in Jellyfin...`);
+
 
       const response = await axios.get(`${this.jellyfinServer}/Items`, {
         headers: {
@@ -98,7 +111,6 @@ class JellyfinService {
       const items = response.data.Items || [];
       
       if (items.length > 0) {
-        console.log(`✅ Found ${items.length} movies in Jellyfin`);
         
         // Return the movies with necessary info
         return {
@@ -117,7 +129,6 @@ class JellyfinService {
           token: token
         };
       } else {
-        console.log('ℹ️ No movies found in Jellyfin');
         return {
           success: false,
           message: 'Movie not found in Jellyfin library',
@@ -126,7 +137,12 @@ class JellyfinService {
         };
       }
     } catch (error) {
-      console.error('❌ Jellyfin search failed:', error.message);
+      // If we get a 401 error and haven't retried yet, clear cache and retry
+      if (error.response?.status === 401 && retryCount === 0) {
+        this.clearTokenCache();
+        return this.searchMovieInJellyfin(movieName, 1);
+      }
+      
       return {
         success: false,
         error: error.message,
