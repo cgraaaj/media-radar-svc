@@ -105,6 +105,12 @@ spec:
               value: {{ .redis.host | quote }}
             - name: REDIS_PORT
               value: {{ .redis.port | quote }}
+            - name: DB_HOST
+              value: {{ .pg.host | quote}}
+            - name: DB_PORT
+              value: {{ .pg.port | quote}}
+            - name: DB_NAME
+              value: {{ .pg.db | quote}}
             - name: TMDB_BASE_URL
               value: {{ .tmdb.baseUrl | quote }}
             - name: TMDB_IMAGE_BASE_URL

@@ -1,19 +1,32 @@
 const { OpenAI } = require('openai');
-const { createClient } = require('@supabase/supabase-js');
+const { Pool } = require('pg');
 
 class AIService {
   constructor() {
     this.openaiClient = null;
-    this.supabaseClient = null;
+    this.dbPool = null;
     this.initialized = false;
     
     // Configuration
     this.EMBEDDING_MODEL = "text-embedding-3-small";
+    this.EMBEDDING_DIMENSIONS = 512;
     this.CHAT_MODEL = "gpt-4o-mini";
-    this.DEFAULT_MATCH_THRESHOLD = 0.3;
-    this.DEFAULT_MATCH_COUNT = 5;
+    this.DEFAULT_TOP_K = 5;
+    this.DEFAULT_ALPHA = 0.5; // Weight for semantic similarity (0..1), (1-alpha) for full-text
     this.DEFAULT_TEMPERATURE = 0.3;
     this.DEFAULT_FREQUENCY_PENALTY = 0.2;
+    
+    // Database configuration
+    this.DB_CONFIG = {
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT),
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    };
     
     // System prompt for movie recommendations
     this.MOVIE_ASSISTANT_PROMPT = `You are a knowledgeable movie expert and enthusiastic film critic who loves helping people discover great movies. 
@@ -40,13 +53,13 @@ Keep responses concise but informative, and always focus on movies and film-rela
       }
       this.openaiClient = new OpenAI({ apiKey: openaiApiKey });
 
-      // Initialize Supabase client
-      const supabaseUrl = process.env.SUPABASE_URL;
-      const supabaseApiKey = process.env.SUPABASE_API_KEY;
-      if (!supabaseUrl || !supabaseApiKey) {
-        throw new Error('Supabase credentials are missing. Please check your environment variables.');
-      }
-      this.supabaseClient = createClient(supabaseUrl, supabaseApiKey);
+      // Initialize PostgreSQL connection pool
+      this.dbPool = new Pool(this.DB_CONFIG);
+      
+      // Test database connection
+      const client = await this.dbPool.connect();
+      await client.query('SELECT 1');
+      client.release();
 
       this.initialized = true;
       console.log('✅ AI Service initialized successfully');
@@ -56,50 +69,102 @@ Keep responses concise but informative, and always focus on movies and film-rela
     }
   }
 
-  async getQueryEmbedding(query) {
+  async generateEmbedding(text) {
     try {
       if (!this.initialized) await this.initialize();
 
       const response = await this.openaiClient.embeddings.create({
-        input: query.trim(),
+        input: text.trim(),
         model: this.EMBEDDING_MODEL,
-        dimensions: 512
+        dimensions: this.EMBEDDING_DIMENSIONS
       });
 
-      const embedding = response.data[0].embedding;
-      console.log(`✅ Generated embedding for query: "${query.substring(0, 50)}..."`);
-      return embedding;
+      return response.data[0].embedding;
     } catch (error) {
       console.error('❌ Failed to generate embedding:', error.message);
       throw error;
     }
   }
 
-  async searchMovies(queryEmbedding, matchThreshold = this.DEFAULT_MATCH_THRESHOLD, matchCount = this.DEFAULT_MATCH_COUNT) {
+  async hybridSearch(queryText, topK = this.DEFAULT_TOP_K, alpha = this.DEFAULT_ALPHA, includeScores = true) {
     try {
       if (!this.initialized) await this.initialize();
-
-      const { data, error } = await this.supabaseClient.rpc('match_movies_jelly', {
-        query_embedding: queryEmbedding,
-        match_threshold: matchThreshold,
-        match_count: matchCount
-      });
-
-      if (error) {
-        throw new Error(`Supabase RPC error: ${error.message}`);
+      
+      if (alpha < 0 || alpha > 1) {
+        throw new Error('Alpha must be between 0 and 1');
       }
 
-      if (data && data.length > 0) {
-        console.log(`✅ Found ${data.length} matching movies`);
-        return data;
-      } else {
-        console.log('ℹ️ No matching movies found');
-        return [];
+      // Generate embedding for query
+      const queryEmbedding = await this.generateEmbedding(queryText);
+
+      // Build SQL query
+      const sqlQuery = this._buildSearchQuery(includeScores);
+      const queryParams = this._buildQueryParams(queryText, queryEmbedding, alpha, topK);
+
+      // Execute search
+      const client = await this.dbPool.connect();
+      try {
+        const result = await client.query(sqlQuery, queryParams);
+        return result.rows;
+      } finally {
+        client.release();
       }
     } catch (error) {
-      console.error('❌ Error searching movies:', error.message);
+      console.error('❌ Hybrid search error:', error.message);
       throw error;
     }
+  }
+
+  _buildSearchQuery(includeScores) {
+    const baseColumns = `
+      id,
+      title,
+      movie_year,
+      rating,
+      summary,
+      genres,
+      directors,
+      cast_members
+    `;
+
+    const scoreColumns = includeScores ? `
+      ts_rank(tsv, plainto_tsquery($1)) AS text_score,
+      1 - (embedding <=> $2::vector) AS vector_score,
+      ( $3::float * (1 - (embedding <=> $4::vector)) +
+        (1 - $5::float) * ts_rank(tsv, plainto_tsquery($6)) ) AS hybrid_score
+    ` : '';
+
+    return `
+      SELECT
+        ${baseColumns}
+        ${includeScores ? ', ' + scoreColumns : ''}
+      FROM movies_app.movies
+      WHERE tsv @@ plainto_tsquery($7) OR embedding <=> $8::vector < 1
+      ORDER BY ( $9::float * (1 - (embedding <=> $10::vector)) +
+                (1 - $11::float) * ts_rank(tsv, plainto_tsquery($12)) ) DESC
+      LIMIT $13;
+    `;
+  }
+
+  _buildQueryParams(queryText, queryEmbedding, alpha, topK) {
+    // Format vector as PostgreSQL array literal
+    const vectorString = `[${queryEmbedding.join(',')}]`;
+    
+    return [
+      queryText,        // $1 - for text_score ts_rank
+      vectorString,     // $2 - for vector_score
+      alpha,            // $3 - for hybrid_score weight
+      vectorString,     // $4 - for hybrid_score vector part
+      alpha,            // $5 - for hybrid_score weight (1-alpha)
+      queryText,        // $6 - for hybrid_score text part
+      queryText,        // $7 - for WHERE clause text search
+      vectorString,     // $8 - for WHERE clause vector search
+      alpha,            // $9 - for ORDER BY hybrid score
+      vectorString,     // $10 - for ORDER BY vector part
+      alpha,            // $11 - for ORDER BY weight (1-alpha)
+      queryText,        // $12 - for ORDER BY text part
+      topK              // $13 - LIMIT
+    ];
   }
 
   async generateMovieResponse(movieContexts, userQuery, temperature = this.DEFAULT_TEMPERATURE) {
@@ -141,20 +206,17 @@ Keep responses concise but informative, and always focus on movies and film-rela
       }
 
       const {
-        matchThreshold = this.DEFAULT_MATCH_THRESHOLD,
-        matchCount = this.DEFAULT_MATCH_COUNT,
+        topK = this.DEFAULT_TOP_K,
+        alpha = this.DEFAULT_ALPHA,
         includeSources = false
       } = options;
 
-      console.log(`🔍 Searching for: "${query}"`);
+      console.log(`🔍 Hybrid searching for: "${query}" (alpha=${alpha})`);
 
-      // Get embedding for user query
-      const queryEmbedding = await this.getQueryEmbedding(query);
+      // Perform hybrid search
+      const results = await this.hybridSearch(query, topK, alpha, true);
 
-      // Search for similar movies
-      const matches = await this.searchMovies(queryEmbedding, matchThreshold, matchCount);
-
-      if (!matches || matches.length === 0) {
+      if (!results || results.length === 0) {
         return {
           success: false,
           message: 'No movies found matching your query. Try rephrasing your question or using different keywords.',
@@ -163,8 +225,13 @@ Keep responses concise but informative, and always focus on movies and film-rela
         };
       }
 
-      // Extract movie contexts
-      const movieContexts = matches.map(match => match.content);
+      // Format movie contexts for AI (simplified)
+      const movieContexts = results.map(movie => {
+        const genres = Array.isArray(movie.genres) ? movie.genres.slice(0, 2).join(', ') : movie.genres || '';
+        const summary = movie.summary ? movie.summary.substring(0, 100) + '...' : '';
+        return `**${movie.title}** (${movie.movie_year}) - ${genres} - Rating: ${movie.rating || 'N/A'} - ${summary}`;
+      });
+
 
       // Generate AI response
       const aiResponse = await this.generateMovieResponse(movieContexts, query);
@@ -173,8 +240,10 @@ Keep responses concise but informative, and always focus on movies and film-rela
         success: true,
         message: aiResponse,
         suggestions: aiResponse,
-        sources: includeSources ? matches : [],
-        matchCount: matches.length
+        sources: includeSources ? results : [],
+        matchCount: results.length,
+        searchType: 'hybrid',
+        alpha: alpha
       };
 
     } catch (error) {
@@ -190,7 +259,14 @@ Keep responses concise but informative, and always focus on movies and film-rela
 
   // Check if the service is properly configured
   isConfigured() {
-    return !!(process.env.OPENAI_API_KEY && process.env.SUPABASE_URL && process.env.SUPABASE_API_KEY);
+    return !!(process.env.OPENAI_API_KEY);
+  }
+
+  // Cleanup method
+  async cleanup() {
+    if (this.dbPool) {
+      await this.dbPool.end();
+    }
   }
 }
 

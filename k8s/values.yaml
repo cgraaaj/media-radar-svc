@@ -122,6 +122,8 @@ vault:
         export SUPABASE_URL="{{ .Data.data.SUPABASE_URL }}"
         export SUPABASE_API_KEY="{{ .Data.data.SUPABASE_API_KEY }}"
         export OPENAI_API_KEY="{{ .Data.data.OPENAI_API_KEY }}"
+        export DB_USER="{{ .Data.data.DB_USER }}"
+        export DB_PASSWORD="{{ .Data.data.DB_PASSWORD }}"
         {{- end }}
   # Optional: direct env variables (values may include Vault template strings if desired)
   env: {}
@@ -201,6 +203,11 @@ env:
     host: "192.168.1.72"  # Update with your actual Redis service name
     port: "6379"
     # password is fetched from Vault, not needed here
+
+  pg:
+    host: "192.168.1.72"
+    port: "5430"
+    db: "media-radar"
   
   # TMDB API Configuration (non-sensitive values only)
   tmdb:
