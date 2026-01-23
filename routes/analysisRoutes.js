@@ -1,16 +1,70 @@
 const express = require('express');
 const router = express.Router();
-const { redisClient, isConnected } = require('../config/database');
+const db = require('../config/database');
 const { normalizeLanguage } = require('../helpers/utils');
+
+// Get Redis root keys and special sections data
+router.get('/redis-keys', async (req, res) => {
+  try {
+    if (!db.isConnected()) {
+      return res.status(503).json({ error: 'Redis is not connected' });
+    }
+    
+    const rawData = await db.redisClient.get('media_radar_cache');
+    if (!rawData) {
+      return res.status(404).json({ error: 'No data found in Redis' });
+    }
+    
+    const parsedData = JSON.parse(rawData);
+    
+    const response = {
+      rootKeys: Object.keys(parsedData),
+      hasTopReleases: !!parsedData.topReleases,
+      hasRecentlyAdded: !!parsedData.recentlyAdded,
+      topReleasesType: Array.isArray(parsedData.topReleases) ? 'array' : typeof parsedData.topReleases,
+      topReleasesCount: Array.isArray(parsedData.topReleases) ? parsedData.topReleases.length : 0,
+      recentlyAddedType: Array.isArray(parsedData.recentlyAdded) ? 'array' : typeof parsedData.recentlyAdded,
+      recentlyAddedCount: Array.isArray(parsedData.recentlyAdded) ? parsedData.recentlyAdded.length : 0
+    };
+    
+    // Check homepageSections
+    if (parsedData.homepageSections) {
+      response.homepageSections = {
+        type: typeof parsedData.homepageSections,
+        keys: Object.keys(parsedData.homepageSections),
+        data: parsedData.homepageSections
+      };
+    }
+    
+    // Check metadata
+    if (parsedData.metadata) {
+      response.metadata = parsedData.metadata;
+    }
+    
+    // Include actual data if arrays exist
+    if (Array.isArray(parsedData.topReleases)) {
+      response.topReleasesData = parsedData.topReleases;
+    }
+    
+    if (Array.isArray(parsedData.recentlyAdded)) {
+      response.recentlyAddedData = parsedData.recentlyAdded.slice(0, 20);
+    }
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Error analyzing Redis keys:', error);
+    res.status(500).json({ error: 'Failed to analyze Redis structure', details: error.message });
+  }
+});
 
 // Analyze Redis data structure
 router.get('/redis-structure', async (req, res) => {
   try {
-    if (!isConnected()) {
+    if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const rawData = await redisClient.get('media_radar_cache');
+    const rawData = await db.redisClient.get('media_radar_cache');
     if (!rawData) {
       return res.status(404).json({ error: 'No data found in Redis' });
     }
@@ -176,11 +230,11 @@ router.get('/redis-structure', async (req, res) => {
 // Get available languages
 router.get('/available-languages', async (req, res) => {
   try {
-    if (!isConnected()) {
+    if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const cachedMovies = await redisClient.get('media_radar_cache');
+    const cachedMovies = await db.redisClient.get('media_radar_cache');
     if (!cachedMovies) {
       return res.status(404).json({ error: 'No movies found in cache' });
     }
@@ -231,11 +285,11 @@ router.get('/available-languages', async (req, res) => {
 // Debug Redis data
 router.get('/debug-redis', async (req, res) => {
   try {
-    if (!isConnected()) {
+    if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
     
-    const rawData = await redisClient.get('media_radar_cache');
+    const rawData = await db.redisClient.get('media_radar_cache');
     if (rawData) {
       try {
         const parsedData = JSON.parse(rawData);

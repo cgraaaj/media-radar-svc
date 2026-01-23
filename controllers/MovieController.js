@@ -11,7 +11,8 @@ class MovieController {
       console.log(`Movie API request - Page: ${page}, Limit: ${limit}`);
       
       const startTime = Date.now();
-      const result = await MediaModel.getMediaByType('movies', page, limit);
+      // Exclude top releases from main movie list to avoid duplicates
+      const result = await MediaModel.getMediaByType('movies', page, limit, true);
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries, 
@@ -210,6 +211,86 @@ class MovieController {
     } catch (error) {
       console.error('Error in MovieController.getMoviesByLanguage:', error);
       res.status(500).json({ error: 'Failed to fetch movies by language', details: error.message });
+    }
+  }
+
+  // Get top releases (movies released this week)
+  async getTopReleases(req, res) {
+    try {
+      const limit = parseInt(req.query.limit) || 10;
+      
+      console.log(`🔥 Fetching top movie releases (limit: ${limit})`);
+      
+      const startTime = Date.now();
+      const result = await MediaModel.getTopReleases('movies', limit);
+      
+      const transformedMovies = await MediaService.transformMediaEntries(
+        result.entries,
+        0,
+        'movie'
+      );
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`⚡ Top releases processing time: ${totalTime}ms`);
+      console.log(`🎉 Found ${transformedMovies.length} top release movies`);
+      
+      res.json({
+        movies: transformedMovies,
+        count: transformedMovies.length,
+        type: 'topReleases',
+        metadata: {
+          processingTimeMs: totalTime
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error in MovieController.getTopReleases:', error);
+      
+      if (error.message.includes('Redis')) {
+        return res.status(503).json({ error: 'Database connection failed', details: error.message });
+      }
+      
+      res.status(500).json({ error: 'Failed to fetch top releases', details: error.message });
+    }
+  }
+
+  // Get recently added movies
+  async getRecentlyAdded(req, res) {
+    try {
+      const limit = parseInt(req.query.limit) || 20;
+      
+      console.log(`📅 Fetching recently added movies (limit: ${limit})`);
+      
+      const startTime = Date.now();
+      const result = await MediaModel.getRecentlyAdded('movies', limit);
+      
+      const transformedMovies = await MediaService.transformMediaEntries(
+        result.entries,
+        0,
+        'movie'
+      );
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`⚡ Recently added processing time: ${totalTime}ms`);
+      console.log(`🎉 Found ${transformedMovies.length} recently added movies`);
+      
+      res.json({
+        movies: transformedMovies,
+        count: transformedMovies.length,
+        type: 'recentlyAdded',
+        metadata: {
+          processingTimeMs: totalTime
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error in MovieController.getRecentlyAdded:', error);
+      
+      if (error.message.includes('Redis')) {
+        return res.status(503).json({ error: 'Database connection failed', details: error.message });
+      }
+      
+      res.status(500).json({ error: 'Failed to fetch recently added movies', details: error.message });
     }
   }
 }

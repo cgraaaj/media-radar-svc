@@ -18,7 +18,7 @@ class MediaModel {
     return JSON.parse(cachedData);
   }
 
-  async getMediaByType(type, page = 1, limit = 20) {
+  async getMediaByType(type, page = 1, limit = 20, excludeTopReleases = false) {
     const rawData = await this.getAllMedia();
     const offset = (page - 1) * limit;
     
@@ -63,11 +63,19 @@ class MediaModel {
     }
 
     // Filter entries that have download options
-    const entriesWithDownloads = filteredEntries.filter(([key, qualityData]) => {
+    let entriesWithDownloads = filteredEntries.filter(([key, qualityData]) => {
       const totalFiles = Object.values(qualityData || {})
         .reduce((total, files) => total + (Array.isArray(files) ? files.length : 0), 0);
       return totalFiles > 0;
     });
+    
+    // Exclude top releases if requested
+    if (excludeTopReleases && rawData.metadata && rawData.metadata.topReleaseKeys) {
+      const topReleaseKeys = rawData.metadata.topReleaseKeys;
+      entriesWithDownloads = entriesWithDownloads.filter(([key]) => {
+        return !topReleaseKeys.includes(key);
+      });
+    }
 
     const totalItems = entriesWithDownloads.length;
     const totalPages = Math.ceil(totalItems / limit);
@@ -257,6 +265,158 @@ class MediaModel {
     );
 
     return (hasSeasonEpisode || hasSeasonEpisodeInFiles) ? 'tvshows' : 'movies';
+  }
+
+  // Get top releases (from homepageSections)
+  async getTopReleases(type, limit = 10) {
+    const rawData = await this.getAllMedia();
+    
+    // Check if Redis has homepageSections with TOP RELEASES THIS WEEK
+    if (rawData.homepageSections && rawData.homepageSections['TOP RELEASES THIS WEEK']) {
+      const topReleasesLinks = rawData.homepageSections['TOP RELEASES THIS WEEK'];
+      
+      if (!Array.isArray(topReleasesLinks)) {
+        return { entries: [], count: 0, type: 'topReleases' };
+      }
+      
+      // Get all movies/tvshows entries
+      const mediaObj = type === 'movies' ? rawData.movies : rawData.tvshows;
+      if (!mediaObj) {
+        return { entries: [], count: 0, type: 'topReleases' };
+      }
+      
+      const allEntries = Object.entries(mediaObj);
+      const matchedEntries = [];
+      
+      // Try to match top releases links with actual movie entries
+      for (const linkItem of topReleasesLinks.slice(0, limit)) {
+        if (!linkItem || !linkItem.href) continue;
+        
+        // Extract movie name from href slug (e.g., "196005-sirai-2025-tamil...")
+        const urlParts = linkItem.href.split('/');
+        const slug = urlParts[urlParts.length - 2] || urlParts[urlParts.length - 1];
+        
+        // Extract the movie title from slug (remove ID and technical details)
+        const slugParts = slug.split('-');
+        const movieNameParts = [];
+        
+        // Get the movie name (stop at year or technical terms)
+        for (const part of slugParts.slice(1)) { // Skip the ID number
+          if (/^\d{4}$/.test(part) || ['tamil', 'true', 'web', 'bluray', 'hdtv'].includes(part.toLowerCase())) {
+            break;
+          }
+          movieNameParts.push(part);
+        }
+        
+        const extractedName = movieNameParts.join(' ').toLowerCase();
+        
+        // Find matching entry by checking if the key starts with or contains the movie name
+        const matched = allEntries.find(([key]) => {
+          const keyLower = key.toLowerCase();
+          return keyLower.includes(extractedName) || extractedName.includes(keyLower.split('(')[0].trim());
+        });
+        
+        if (matched && !matchedEntries.find(([k]) => k === matched[0])) {
+          matchedEntries.push(matched);
+        }
+      }
+      
+      return {
+        entries: matchedEntries.slice(0, limit),
+        count: matchedEntries.length,
+        type: 'topReleases'
+      };
+    }
+    
+    // Fallback: Return first N movies
+    const { entries } = await this.getMediaByType(type, 1, limit);
+    return {
+      entries: entries.slice(0, limit),
+      count: entries.length,
+      type: 'topReleases'
+    };
+  }
+
+  // Get recently added content (from homepageSections)
+  async getRecentlyAdded(type, limit = 20) {
+    const rawData = await this.getAllMedia();
+    
+    // Check if Redis has homepageSections with RECENTLY ADDED
+    if (rawData.homepageSections && rawData.homepageSections['RECENTLY ADDED']) {
+      const recentlyAddedLinks = rawData.homepageSections['RECENTLY ADDED'];
+      
+      if (!Array.isArray(recentlyAddedLinks)) {
+        return { entries: [], count: 0, type: 'recentlyAdded' };
+      }
+      
+      // Get all movies/tvshows entries
+      const mediaObj = type === 'movies' ? rawData.movies : rawData.tvshows;
+      if (!mediaObj) {
+        return { entries: [], count: 0, type: 'recentlyAdded' };
+      }
+      
+      const allEntries = Object.entries(mediaObj);
+      const matchedEntries = [];
+      
+      // Try to match recently added links with actual movie entries
+      for (const linkItem of recentlyAddedLinks.slice(0, limit)) {
+        if (!linkItem || !linkItem.href) continue;
+        
+        // Extract movie name from href slug (e.g., "196005-sirai-2025-tamil...")
+        const urlParts = linkItem.href.split('/');
+        const slug = urlParts[urlParts.length - 2] || urlParts[urlParts.length - 1];
+        
+        // Extract the movie title from slug (remove ID and technical details)
+        const slugParts = slug.split('-');
+        const movieNameParts = [];
+        
+        // Get the movie name (stop at year or technical terms)
+        for (const part of slugParts.slice(1)) { // Skip the ID number
+          if (/^\d{4}$/.test(part) || ['tamil', 'true', 'web', 'bluray', 'hdtv'].includes(part.toLowerCase())) {
+            break;
+          }
+          movieNameParts.push(part);
+        }
+        
+        const extractedName = movieNameParts.join(' ').toLowerCase();
+        
+        // Find matching entry by checking if the key starts with or contains the movie name
+        const matched = allEntries.find(([key]) => {
+          const keyLower = key.toLowerCase();
+          return keyLower.includes(extractedName) || extractedName.includes(keyLower.split('(')[0].trim());
+        });
+        
+        if (matched && !matchedEntries.find(([k]) => k === matched[0])) {
+          matchedEntries.push(matched);
+        }
+      }
+      
+      return {
+        entries: matchedEntries.slice(0, limit),
+        count: matchedEntries.length,
+        type: 'recentlyAdded'
+      };
+    }
+    
+    // Fallback: Return the first N movies from the collection
+    const { entries } = await this.getMediaByType(type, 1, limit);
+    
+    return {
+      entries: entries.slice(0, limit),
+      count: entries.length,
+      type: 'recentlyAdded'
+    };
+  }
+
+  // Helper to check if an item is a TV show
+  isTVShow(item) {
+    if (typeof item === 'string') {
+      return this.determineMediaType(item, {}) === 'tvshows';
+    } else if (typeof item === 'object') {
+      const key = item.title || item.name || '';
+      return this.determineMediaType(key, {}) === 'tvshows';
+    }
+    return false;
   }
 }
 

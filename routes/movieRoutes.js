@@ -5,6 +5,12 @@ const MovieController = require('../controllers/MovieController');
 // Get movies with pagination
 router.get('/', MovieController.getMovies.bind(MovieController));
 
+// Get top releases (movies released this week)
+router.get('/top-releases', MovieController.getTopReleases.bind(MovieController));
+
+// Get recently added movies
+router.get('/recently-added', MovieController.getRecentlyAdded.bind(MovieController));
+
 // Search movies with pagination
 router.get('/search', MovieController.searchMovies.bind(MovieController));
 
