@@ -289,7 +289,7 @@ class MediaModel {
       const matchedEntries = [];
       
       // Try to match top releases links with actual movie entries
-      for (const linkItem of topReleasesLinks.slice(0, limit)) {
+      for (const linkItem of topReleasesLinks) {
         if (!linkItem || !linkItem.href) continue;
         
         // Extract movie name from href slug (e.g., "196005-sirai-2025-tamil...")
@@ -322,16 +322,16 @@ class MediaModel {
       }
       
       return {
-        entries: matchedEntries.slice(0, limit),
+        entries: matchedEntries,
         count: matchedEntries.length,
         type: 'topReleases'
       };
     }
     
-    // Fallback: Return first N movies
+    // Fallback: Return first N movies (if homepageSections not available)
     const { entries } = await this.getMediaByType(type, 1, limit);
     return {
-      entries: entries.slice(0, limit),
+      entries: entries,
       count: entries.length,
       type: 'topReleases'
     };
