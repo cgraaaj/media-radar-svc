@@ -7,12 +7,13 @@ class MovieController {
     try {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
+      const language = req.query.language || null;
       
-      console.log(`Movie API request - Page: ${page}, Limit: ${limit}`);
+      console.log(`Movie API request - Page: ${page}, Limit: ${limit}${language ? `, Language: ${language}` : ''}`);
       
       const startTime = Date.now();
       // Exclude top releases from main movie list to avoid duplicates
-      const result = await MediaModel.getMediaByType('movies', page, limit, true);
+      const result = await MediaModel.getMediaByType('movies', page, limit, true, language);
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries, 

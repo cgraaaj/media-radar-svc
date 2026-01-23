@@ -17,8 +17,41 @@ class MediaModel {
 
     return JSON.parse(cachedData);
   }
+  
+  // Helper function to detect language from movie/show data
+  detectLanguage(key, qualityData) {
+    // First, check file metadata for language information
+    for (const [quality, files] of Object.entries(qualityData || {})) {
+      if (Array.isArray(files) && files.length > 0) {
+        const file = files[0];
+        if (file.language && Array.isArray(file.language) && file.language.length > 0) {
+          const lang = file.language[0].toLowerCase();
+          
+          // Normalize language codes
+          if (lang.includes('tamil') || lang === 'tam') return 'tamil';
+          if (lang.includes('telugu') || lang === 'tel') return 'telugu';
+          if (lang.includes('kannada') || lang === 'kan') return 'kannada';
+          if (lang.includes('malayalam') || lang === 'mal') return 'malayalam';
+          if (lang.includes('hindi') || lang === 'hin') return 'hindi';
+          if (lang.includes('english') || lang === 'eng') return 'english';
+        }
+      }
+    }
+    
+    // Fallback: Check title for language keywords
+    const titleLower = key.toLowerCase();
+    if (titleLower.includes('tamil')) return 'tamil';
+    if (titleLower.includes('telugu')) return 'telugu';
+    if (titleLower.includes('kannada')) return 'kannada';
+    if (titleLower.includes('malayalam')) return 'malayalam';
+    if (titleLower.includes('hindi')) return 'hindi';
+    if (titleLower.includes('english') || titleLower.includes('eng')) return 'english';
+    
+    // If no language found, return 'others'
+    return 'others';
+  }
 
-  async getMediaByType(type, page = 1, limit = 20, excludeTopReleases = false) {
+  async getMediaByType(type, page = 1, limit = 20, excludeTopReleases = false, language = null) {
     const rawData = await this.getAllMedia();
     const offset = (page - 1) * limit;
     
@@ -74,6 +107,14 @@ class MediaModel {
       const topReleaseKeys = rawData.metadata.topReleaseKeys;
       entriesWithDownloads = entriesWithDownloads.filter(([key]) => {
         return !topReleaseKeys.includes(key);
+      });
+    }
+    
+    // Filter by language if requested
+    if (language && language !== 'all') {
+      entriesWithDownloads = entriesWithDownloads.filter(([key, qualityData]) => {
+        const detectedLanguage = this.detectLanguage(key, qualityData);
+        return detectedLanguage === language;
       });
     }
 
