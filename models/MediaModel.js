@@ -5,6 +5,46 @@ class MediaModel {
     this.cacheKey = process.env.REDIS_CACHE_KEY || 'media_radar_cache';
   }
 
+  /**
+   * Deduplicate files by extracting info_hash from magnet links
+   * Keeps the first occurrence of each unique torrent
+   */
+  deduplicateFiles(files) {
+    if (!Array.isArray(files)) return files;
+    
+    const seen = new Set();
+    return files.filter(file => {
+      if (!file) return false;
+      
+      // Extract info_hash from magnet link
+      const magnet = file.magnetLink || file.magnet_link || '';
+      const match = magnet.match(/btih:([a-fA-F0-9]{40})/i);
+      
+      if (match) {
+        const infoHash = match[1].toLowerCase();
+        if (seen.has(infoHash)) {
+          return false; // Skip duplicate
+        }
+        seen.add(infoHash);
+      }
+      
+      return true;
+    });
+  }
+
+  /**
+   * Deduplicate all quality categories in a media entry
+   */
+  deduplicateQualityData(qualityData) {
+    if (!qualityData || typeof qualityData !== 'object') return qualityData;
+    
+    const dedupedData = {};
+    for (const [quality, files] of Object.entries(qualityData)) {
+      dedupedData[quality] = this.deduplicateFiles(files);
+    }
+    return dedupedData;
+  }
+
   async getAllMedia() {
     if (!db.isConnected()) {
       throw new Error('Redis is not connected');
@@ -122,8 +162,14 @@ class MediaModel {
     const totalPages = Math.ceil(totalItems / limit);
     const paginatedEntries = entriesWithDownloads.slice(offset, offset + limit);
 
+    // Deduplicate files in each entry (removes duplicate torrents with same info_hash)
+    const dedupedEntries = paginatedEntries.map(([key, qualityData]) => [
+      key,
+      this.deduplicateQualityData(qualityData)
+    ]);
+
     return {
-      entries: paginatedEntries,
+      entries: dedupedEntries,
       pagination: {
         currentPage: page,
         totalPages,
@@ -183,8 +229,14 @@ class MediaModel {
     const totalFiltered = filteredEntries.length;
     const paginatedEntries = filteredEntries.slice(offset, offset + limit);
     
+    // Deduplicate files in each entry
+    const dedupedEntries = paginatedEntries.map(([key, qualityData]) => [
+      key,
+      this.deduplicateQualityData(qualityData)
+    ]);
+    
     return {
-      entries: paginatedEntries,
+      entries: dedupedEntries,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(totalFiltered / limit),
@@ -362,9 +414,15 @@ class MediaModel {
         }
       }
       
+      // Deduplicate files in each entry
+      const dedupedEntries = matchedEntries.map(([key, qualityData]) => [
+        key,
+        this.deduplicateQualityData(qualityData)
+      ]);
+      
       return {
-        entries: matchedEntries,
-        count: matchedEntries.length,
+        entries: dedupedEntries,
+        count: dedupedEntries.length,
         type: 'topReleases'
       };
     }
@@ -372,7 +430,7 @@ class MediaModel {
     // Fallback: Return first N movies (if homepageSections not available)
     const { entries } = await this.getMediaByType(type, 1, limit);
     return {
-      entries: entries,
+      entries: entries, // Already deduped by getMediaByType
       count: entries.length,
       type: 'topReleases'
     };
@@ -432,9 +490,15 @@ class MediaModel {
         }
       }
       
+      // Deduplicate files in each entry
+      const dedupedEntries = matchedEntries.slice(0, limit).map(([key, qualityData]) => [
+        key,
+        this.deduplicateQualityData(qualityData)
+      ]);
+      
       return {
-        entries: matchedEntries.slice(0, limit),
-        count: matchedEntries.length,
+        entries: dedupedEntries,
+        count: dedupedEntries.length,
         type: 'recentlyAdded'
       };
     }
@@ -443,7 +507,7 @@ class MediaModel {
     const { entries } = await this.getMediaByType(type, 1, limit);
     
     return {
-      entries: entries.slice(0, limit),
+      entries: entries.slice(0, limit), // Already deduped by getMediaByType
       count: entries.length,
       type: 'recentlyAdded'
     };

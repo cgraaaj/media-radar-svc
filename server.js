@@ -8,6 +8,7 @@ const movieRoutes = require('./routes/movieRoutes');
 const tvShowRoutes = require('./routes/tvShowRoutes');
 const analysisRoutes = require('./routes/analysisRoutes');
 const aiRoutes = require('./routes/aiRoutes');
+const torrentStatsRoutes = require('./routes/torrentStatsRoutes');
 const logger = require('./config/logger');
 const { randomUUID } = require('crypto');
 
@@ -17,7 +18,7 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',') 
-  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.1.72:3000'];
+  : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://10.19.94.72:3000'];
 
 // Request ID + basic access log
 app.use((req, res, next) => {
@@ -64,6 +65,7 @@ app.use('/api/movies', movieRoutes);
 app.use('/api/tvshows', tvShowRoutes);
 app.use('/api/analyze', analysisRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/torrent-stats', torrentStatsRoutes);
 
 // Health endpoints
 app.get('/healthz', (req, res) => {
@@ -84,6 +86,7 @@ app.get('/', (req, res) => {
       tvshows: '/api/tvshows',
       analysis: '/api/analyze', 
       ai: '/api/ai',
+      torrentStats: '/api/torrent-stats',
       health: '/healthz', 
       ready: '/readyz' 
     }

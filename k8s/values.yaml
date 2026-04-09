@@ -200,12 +200,12 @@ env:
   
   # Redis Configuration (non-sensitive values only)
   redis:
-    host: "192.168.1.72"  # Update with your actual Redis service name
+    host: "10.19.94.72"  # Update with your actual Redis service name
     port: "6379"
     # password is fetched from Vault, not needed here
 
   pg:
-    host: "192.168.1.72"
+    host: "10.19.94.72"
     port: "5430"
     db: "media-radar"
   

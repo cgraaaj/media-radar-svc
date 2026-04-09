@@ -25,6 +25,7 @@
     "parse-torrent": "^9.1.5",
     "pg": "^8.11.3",
     "redis": "^4.6.8",
+    "sqlite3": "^5.1.7",
     "webtorrent": "^2.0.0"
   },
   "devDependencies": {
