@@ -237,78 +237,237 @@ class MediaService {
     };
   }
 
-  // Process download data for any media type
+  // -------------------------------------------------------------------------
+  // Source-aware file normalizer
+  // -------------------------------------------------------------------------
+  //
+  // The unified crawler writes each quality as `{direct:[…], torrent:[…], magnet:[…]}`
+  // where the shape differs per kind. The UI only cares about a flat, uniform
+  // list of "downloadable files" with a common set of fields. This function
+  // turns the raw bucket into that flat list.
+  //
+  // Output shape (per file):
+  //   {
+  //     source: "hdhub4u" | "1tamilmv",
+  //     kind:   "direct" | "torrent" | "magnet",
+  //     filename, originalFilename, size, sizeSource,
+  //     href,                 // best action URL: finalUrl | torrentUrl | magnet | originalUrl
+  //     magnetLink,           // always present for magnet/ paired torrent-magnet
+  //     torrentUrl,           // .torrent URL if any
+  //     status,               // direct: resolved | cpm_gated | stream | null
+  //     host, label,          // for direct links
+  //     postUrl, postTitle,   // origin post on the source site
+  //     language, releaseYear,
+  //     posterUrl, addedAt,
+  //     sourceLabel,          // "HDHub4u" / "1TamilMV" for display
+  //     season, episode, episodeRange (for TV shows)
+  //   }
+  // -------------------------------------------------------------------------
+  normalizeFile(rawFile, mediaType, aggregates) {
+    if (!rawFile || typeof rawFile !== 'object') return null;
+
+    const kind = rawFile.kind ||
+      (rawFile.magnet ? 'magnet' : (rawFile.torrentUrl ? 'torrent' : 'direct'));
+
+    const source = rawFile.source ||
+      (rawFile.torrentUrl && /1tamilmv/i.test(rawFile.torrentUrl) ? '1tamilmv' :
+       rawFile.magnet && /1tamilmv/i.test(rawFile.magnet) ? '1tamilmv' :
+       'hdhub4u');
+
+    const filename = rawFile.filename || rawFile.name || null;
+    const rawSize = rawFile.size;
+
+    const processed = {
+      source,
+      kind,
+      sourceLabel: source === '1tamilmv' ? '1TamilMV' : (source === 'hdhub4u' ? 'HDHub4u' : source),
+      filename: filename ? cleanFilename(filename) : (rawFile.label || rawFile.pageTitle || 'Unknown'),
+      originalFilename: filename,
+      size: formatFileSize(rawSize) || (filename ? extractSizeFromFilename(filename) : 'Unknown'),
+      sizeSource: rawSize ? 'redis_metadata' : 'filename_extraction',
+      postUrl: rawFile.postUrl || rawFile.sourceUrl || null,
+      postTitle: rawFile.postTitle || rawFile.pageTitle || null,
+      posterUrl: rawFile.posterUrl || null,
+      addedAt: rawFile.addedAt || rawFile.shareDate || null,
+      status: rawFile.status || null,
+      host: rawFile.host || null,
+      label: rawFile.label || null,
+      originalUrl: rawFile.originalUrl || null,
+      finalUrl: rawFile.finalUrl || null,
+      magnetLink: null,
+      torrentUrl: null,
+      href: '#',
+    };
+
+    // Kind-specific best-action URL.
+    if (kind === 'magnet') {
+      processed.magnetLink = rawFile.magnet || rawFile.magnetLink || null;
+      processed.href = processed.magnetLink || '#';
+    } else if (kind === 'torrent') {
+      processed.torrentUrl = rawFile.torrentUrl || null;
+      processed.href = processed.torrentUrl || '#';
+    } else {
+      // direct
+      processed.href = rawFile.finalUrl || rawFile.originalUrl || rawFile.href || rawFile.url || '#';
+    }
+
+    // Language normalization + collect the aggregated list.
+    if (rawFile.language) {
+      const normalizedLang = normalizeLanguage(rawFile.language);
+      if (normalizedLang) {
+        processed.language = normalizedLang;
+        if (aggregates && !aggregates.languages.includes(normalizedLang)) {
+          aggregates.languages.push(normalizedLang);
+        }
+      }
+    }
+
+    // Release year from filename.
+    if (filename) {
+      const yearMatch = filename.match(/\b(19|20)\d{2}\b/);
+      if (yearMatch) processed.releaseYear = parseInt(yearMatch[0], 10);
+    }
+
+    // TV show season/episode metadata.
+    if (mediaType === 'tvshow' && filename) {
+      const seasonMatch = filename.match(/[Ss](\d+)/);
+      const episodeMatch = filename.match(/[Ee](\d+)/);
+      if (seasonMatch) processed.season = parseInt(seasonMatch[1], 10);
+      if (episodeMatch) processed.episode = parseInt(episodeMatch[1], 10);
+      const rangeMatch = filename.match(/[Ee](\d+)-[Ee](\d+)/);
+      if (rangeMatch) {
+        processed.episodeRange = {
+          start: parseInt(rangeMatch[1], 10),
+          end: parseInt(rangeMatch[2], 10),
+        };
+      }
+    }
+
+    if (processed.posterUrl && aggregates && !aggregates.moviePosterUrl) {
+      aggregates.moviePosterUrl = processed.posterUrl;
+    }
+    if (aggregates) {
+      aggregates.sources.add(source);
+      aggregates.kinds.add(kind);
+    }
+
+    return processed;
+  }
+
+  /**
+   * Transforms the Redis quality data into the UI-friendly shape:
+   *   {
+   *     downloadOptions:  { "4k": [file,…], "1080p": [...] ... },
+   *     downloadLanguages:{ available: [] },
+   *     totalFiles, moviePosterUrl,
+   *     availableSources: ["hdhub4u","1tamilmv"],
+   *     availableKinds:   ["direct","torrent","magnet"]
+   *   }
+   *
+   * Tolerant of BOTH schemas:
+   *   - NEW: qualities = { "1080p": { direct, torrent, magnet } }
+   *   - OLD: qualityData = { "1080p": [files] }
+   */
   processDownloadData(qualityData, mediaType = 'movie') {
     const downloadOptions = {};
-    const downloadLanguages = { available: [] };
-    let moviePosterUrl = null;
-    
-    Object.entries(qualityData).forEach(([quality, files]) => {
-      if (Array.isArray(files) && files.length > 0) {
-        downloadOptions[quality] = files.map(file => {
-          // Extract posterUrl from file data (use first available posterUrl)
-          if (file.posterUrl && !moviePosterUrl) {
-            moviePosterUrl = file.posterUrl;
+    const aggregates = {
+      languages: [],
+      moviePosterUrl: null,
+      sources: new Set(),
+      kinds: new Set(),
+    };
+
+    if (!qualityData || typeof qualityData !== 'object') {
+      return {
+        downloadOptions,
+        downloadLanguages: { available: [] },
+        totalFiles: 0,
+        moviePosterUrl: null,
+        availableSources: [],
+        availableKinds: [],
+      };
+    }
+
+    for (const [quality, bucket] of Object.entries(qualityData)) {
+      const files = [];
+      if (Array.isArray(bucket)) {
+        for (const raw of bucket) {
+          const f = this.normalizeFile(raw, mediaType, aggregates);
+          if (f) files.push(f);
+        }
+      } else if (bucket && typeof bucket === 'object') {
+        for (const kind of ['direct', 'torrent', 'magnet']) {
+          const arr = bucket[kind];
+          if (!Array.isArray(arr)) continue;
+          for (const raw of arr) {
+            const f = this.normalizeFile(
+              { ...raw, kind: raw.kind || kind },
+              mediaType,
+              aggregates,
+            );
+            if (f) files.push(f);
           }
-
-          const processedFile = {
-            filename: cleanFilename(file.filename || file.name || 'Unknown'),
-            originalFilename: file.filename || file.name,
-            href: file.href || file.url || '#',
-            size: formatFileSize(file.size) || extractSizeFromFilename(file.filename || ''),
-            sizeSource: file.size ? 'redis_metadata' : 'filename_extraction'
-          };
-
-          // Add magnetLink support from new backend structure
-          if (file.magnetLink) {
-            processedFile.magnetLink = file.magnetLink;
-          }
-
-          // Extract TV show specific metadata
-          if (mediaType === 'tvshow' && file.filename) {
-            const seasonMatch = file.filename.match(/[Ss](\d+)/);
-            const episodeMatch = file.filename.match(/[Ee](\d+)/);
-            
-            if (seasonMatch) processedFile.season = parseInt(seasonMatch[1]);
-            if (episodeMatch) processedFile.episode = parseInt(episodeMatch[1]);
-            
-            const episodeRangeMatch = file.filename.match(/[Ee](\d+)-[Ee](\d+)/);
-            if (episodeRangeMatch) {
-              processedFile.episodeRange = {
-                start: parseInt(episodeRangeMatch[1]),
-                end: parseInt(episodeRangeMatch[2])
-              };
-            }
-          }
-
-          // Language processing
-          if (file.language) {
-            const normalizedLang = normalizeLanguage(file.language);
-            if (normalizedLang) {
-              processedFile.language = normalizedLang;
-              if (!downloadLanguages.available.includes(normalizedLang)) {
-                downloadLanguages.available.push(normalizedLang);
-              }
-            }
-          }
-
-          // Release year extraction
-          if (file.filename) {
-            const yearMatch = file.filename.match(/\b(19|20)\d{2}\b/);
-            if (yearMatch) {
-              processedFile.releaseYear = parseInt(yearMatch[0]);
-            }
-          }
-
-          return processedFile;
-        });
+        }
       }
-    });
 
-    const totalFiles = Object.values(downloadOptions)
-      .reduce((total, files) => total + files.length, 0);
+      if (files.length > 0) {
+        // Pair torrent/magnet siblings from the same source so the UI can show
+        // both buttons on a single row. Matching is done by info_hash.
+        const paired = this.pairTorrentMagnet(files);
+        downloadOptions[quality] = paired;
+      }
+    }
 
-    return { downloadOptions, downloadLanguages, totalFiles, moviePosterUrl };
+    const totalFiles = Object.values(downloadOptions).reduce((n, arr) => n + arr.length, 0);
+
+    return {
+      downloadOptions,
+      downloadLanguages: { available: aggregates.languages },
+      totalFiles,
+      moviePosterUrl: aggregates.moviePosterUrl,
+      availableSources: Array.from(aggregates.sources),
+      availableKinds: Array.from(aggregates.kinds),
+    };
+  }
+
+  // Pair torrent + magnet rows that share the same info_hash. The torrent row
+  // is preferred (keeps `.torrent` filename metadata) and the magnet URL is
+  // attached to it. The stand-alone magnet is then dropped to avoid duplicates.
+  pairTorrentMagnet(files) {
+    const magnetByHash = new Map();
+    for (const f of files) {
+      if (f.kind === 'magnet' && f.magnetLink) {
+        const m = f.magnetLink.match(/btih:([a-fA-F0-9]{40})/i);
+        if (m) magnetByHash.set(m[1].toLowerCase(), f);
+      }
+    }
+
+    const merged = [];
+    const consumedHashes = new Set();
+    for (const f of files) {
+      if (f.kind === 'torrent' && f.torrentUrl) {
+        // Try to pair with a magnet by filename-derived info_hash (best-effort: match by filename)
+        const sameName = Array.from(magnetByHash.entries()).find(([, m]) =>
+          m.originalFilename && f.originalFilename &&
+          m.originalFilename.replace(/\.torrent$/i, '') === f.originalFilename.replace(/\.torrent$/i, '')
+        );
+        if (sameName) {
+          f.magnetLink = sameName[1].magnetLink;
+          consumedHashes.add(sameName[0]);
+        }
+        merged.push(f);
+      } else if (f.kind === 'magnet') {
+        // Defer; we'll add unmerged magnets after the loop.
+        continue;
+      } else {
+        merged.push(f);
+      }
+    }
+    // Append magnets that didn't pair with any torrent.
+    for (const [hash, m] of magnetByHash.entries()) {
+      if (!consumedHashes.has(hash)) merged.push(m);
+    }
+    return merged;
   }
 
   // Get media details with caching
@@ -355,36 +514,54 @@ class MediaService {
   async transformMediaEntries(entries, startIndex = 0, mediaType = 'movie') {
     const transformedMedia = [];
     const batchSize = 5;
-    
+
     for (let i = 0; i < entries.length; i += batchSize) {
       const batch = entries.slice(i, i + batchSize);
-      const batchPromises = batch.map(async ([mediaKey, qualityData], batchIndex) => {
+      const batchPromises = batch.map(async ([mediaKey, entry], batchIndex) => {
         const globalIndex = startIndex + i + batchIndex;
-        
+
         try {
-          // Extract title and year from the key
+          // New wrapper has type/year/posterUrl/sources/qualities; old flat
+          // entries are plain quality maps.
+          const wrapper = (entry && typeof entry === 'object' && entry.qualities) ? entry : null;
+          const qualityData = wrapper ? wrapper.qualities : entry;
+
+          // Extract title and year from the key, but prefer wrapper.year when set.
           const titleMatch = mediaKey.match(/^(.+?)\s*\((\d{4})\)$/);
           const title = titleMatch ? titleMatch[1].trim() : mediaKey.trim();
-          const year = titleMatch ? parseInt(titleMatch[2]) : new Date().getFullYear();
-          
-          // Get media details
+          const year = (wrapper && wrapper.year) || (titleMatch ? parseInt(titleMatch[2], 10) : new Date().getFullYear());
+
           const mediaDetails = await this.getMediaDetails(title, year, mediaType);
-          
-          // Process download data
-          const { downloadOptions, downloadLanguages, totalFiles, moviePosterUrl } = this.processDownloadData(qualityData, mediaType);
-          
-          // Create the final media object
-          return {
-            id: globalIndex + 1,
-            ...mediaDetails,
-            // Prioritize posterUrl from backend data, then fallback to TMDB/OMDB
-            poster: moviePosterUrl || mediaDetails.poster,
+
+          const {
             downloadOptions,
             downloadLanguages,
             totalFiles,
-            originalKey: mediaKey
+            moviePosterUrl,
+            availableSources,
+            availableKinds,
+          } = this.processDownloadData(qualityData, mediaType);
+
+          // Poster precedence: wrapper.posterUrl > first file.posterUrl > TMDB/OMDb > default.
+          const poster = (wrapper && wrapper.posterUrl) || moviePosterUrl || mediaDetails.poster;
+
+          const sources = wrapper && Array.isArray(wrapper.sources) && wrapper.sources.length
+            ? wrapper.sources
+            : availableSources;
+
+          return {
+            id: globalIndex + 1,
+            ...mediaDetails,
+            poster,
+            downloadOptions,
+            downloadLanguages,
+            totalFiles,
+            originalKey: mediaKey,
+            sources,
+            availableKinds,
+            firstSeenAt: wrapper ? wrapper.firstSeenAt : undefined,
+            lastUpdatedAt: wrapper ? wrapper.lastUpdatedAt : undefined,
           };
-          
         } catch (error) {
           console.error(`Error transforming media ${mediaKey}:`, error);
           return {
@@ -398,20 +575,21 @@ class MediaService {
             hasRealPoster: false,
             dataSource: 'error',
             error: error.message,
-            type: mediaType
+            type: mediaType,
+            sources: [],
+            availableKinds: [],
           };
         }
       });
-      
+
       const batchResults = await Promise.all(batchPromises);
       transformedMedia.push(...batchResults);
-      
-      // Add a small delay between batches to prevent rate limiting
+
       if (i + batchSize < entries.length) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
-    
+
     return transformedMedia;
   }
 }

@@ -8,12 +8,17 @@ class MovieController {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
       const language = req.query.language || null;
-      
-      console.log(`Movie API request - Page: ${page}, Limit: ${limit}${language ? `, Language: ${language}` : ''}`);
-      
+      const source = req.query.source || null;
+
+      console.log(`Movie API request - Page: ${page}, Limit: ${limit}${language ? `, Language: ${language}` : ''}${source ? `, Source: ${source}` : ''}`);
+
       const startTime = Date.now();
       // Exclude top releases from main movie list to avoid duplicates
-      const result = await MediaModel.getMediaByType('movies', page, limit, true, language);
+      const result = await MediaModel.getMediaByType('movies', page, limit, {
+        excludeTopReleases: true,
+        language,
+        source,
+      });
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries, 
@@ -85,11 +90,12 @@ class MovieController {
       const query = req.query.q || '';
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      
-      console.log(`🔍 Movie search request - Query: "${query}", Page: ${page}, Limit: ${limit}`);
-      
+      const source = req.query.source || null;
+
+      console.log(`🔍 Movie search request - Query: "${query}", Page: ${page}, Limit: ${limit}${source ? `, Source: ${source}` : ''}`);
+
       const startTime = Date.now();
-      const result = await MediaModel.searchMedia('movies', query, page, limit);
+      const result = await MediaModel.searchMedia('movies', query, page, limit, { source });
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries, 
@@ -219,11 +225,12 @@ class MovieController {
   async getTopReleases(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 10;
-      
-      console.log(`🔥 Fetching top movie releases (limit: ${limit})`);
-      
+      const source = req.query.source || null;
+
+      console.log(`🔥 Fetching top movie releases (limit: ${limit}${source ? `, source: ${source}` : ''})`);
+
       const startTime = Date.now();
-      const result = await MediaModel.getTopReleases('movies', limit);
+      const result = await MediaModel.getTopReleases('movies', limit, { source });
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries,
@@ -259,11 +266,12 @@ class MovieController {
   async getRecentlyAdded(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 20;
-      
-      console.log(`📅 Fetching recently added movies (limit: ${limit})`);
-      
+      const source = req.query.source || null;
+
+      console.log(`📅 Fetching recently added movies (limit: ${limit}${source ? `, source: ${source}` : ''})`);
+
       const startTime = Date.now();
-      const result = await MediaModel.getRecentlyAdded('movies', limit);
+      const result = await MediaModel.getRecentlyAdded('movies', limit, { source });
       
       const transformedMovies = await MediaService.transformMediaEntries(
         result.entries,

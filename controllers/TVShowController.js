@@ -7,11 +7,13 @@ class TVShowController {
     try {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      
-      console.log(`TV Show API request - Page: ${page}, Limit: ${limit}`);
-      
+      const source = req.query.source || null;
+      const language = req.query.language || null;
+
+      console.log(`TV Show API request - Page: ${page}, Limit: ${limit}${source ? `, Source: ${source}` : ''}${language ? `, Language: ${language}` : ''}`);
+
       const startTime = Date.now();
-      const result = await MediaModel.getMediaByType('tvshows', page, limit);
+      const result = await MediaModel.getMediaByType('tvshows', page, limit, { language, source });
       
       const transformedTVShows = await MediaService.transformMediaEntries(
         result.entries, 
@@ -85,11 +87,12 @@ class TVShowController {
       const query = req.query.q || '';
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      
-      console.log(`🔍 TV show search request - Query: "${query}", Page: ${page}, Limit: ${limit}`);
-      
+      const source = req.query.source || null;
+
+      console.log(`🔍 TV show search request - Query: "${query}", Page: ${page}, Limit: ${limit}${source ? `, Source: ${source}` : ''}`);
+
       const startTime = Date.now();
-      const result = await MediaModel.searchMedia('tvshows', query, page, limit);
+      const result = await MediaModel.searchMedia('tvshows', query, page, limit, { source });
       
       const transformedTVShows = await MediaService.transformMediaEntries(
         result.entries, 
