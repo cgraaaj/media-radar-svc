@@ -71,6 +71,11 @@ ingressRoute:
   routes:
     - match: Host(`mediaradar.cgraaaj.in`) && PathPrefix(`/api`)
       kind: Rule
+      # Authentik forward-auth. Browser fetches from the mediaradar UI
+      # will carry the SSO cookie; non-browser clients must auth separately.
+      middlewares:
+        - name: ak-outpost-authentik-embedded-outpost
+          namespace: authentik
       services:
         - name: mediaradar-svc-k8s
           port: 5000
