@@ -52,7 +52,19 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-request-id']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-request-id', 'If-None-Match', 'Cache-Control'],
+  // Expose cache diagnostic headers so browser devtools / frontend can inspect them.
+  exposedHeaders: [
+    'ETag',
+    'X-Cache-Tier',
+    'X-Cache-Key',
+    'X-Cache-Version',
+    'X-Cache-Source',
+    'X-Cache-Age-Ms',
+    'X-Cache-Fallback',
+    'X-Breaker-State',
+    'x-request-id',
+  ],
 };
 
 app.use(cors(corsOptions));

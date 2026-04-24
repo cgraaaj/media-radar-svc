@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const { CircuitBreaker, CircuitBreakerOpenError } = require('../helpers/circuitBreaker');
 
 // ---------------------------------------------------------------------------
 // Cache schema (produced by the unified crawler, version >= 3.0)
@@ -33,9 +34,67 @@ const db = require('../config/database');
 const SUPPORTED_SOURCES = ['hdhub4u', '1tamilmv'];
 const QUALITY_ORDER = { '4k': 4, '1080p': 3, '720p': 2, '480p': 1, 'others': 0 };
 
+// ---------------------------------------------------------------------------
+// Cache tiering (hot / cold)
+//
+//   media_radar_cache:hot   -> short-TTL (~3h) fresh release pool. Powers the
+//                              "Latest" surfaces: Top Releases, Recently Added.
+//   media_radar_cache:cold  -> long-TTL (~7d) broader catalog. Powers the
+//                              "All Movies" / "All TV Shows" paginated grid.
+//   media_radar_cache       -> legacy unified key; kept as a last-resort
+//                              fallback so a missing :hot / :cold blob does
+//                              not black-hole the UI.
+// ---------------------------------------------------------------------------
+const CACHE_KEYS = {
+  hot: 'media_radar_cache:hot',
+  cold: 'media_radar_cache:cold',
+  legacy: 'media_radar_cache',
+};
+// `warm` is a virtual tier composed by the app as hot ∪ cold dedup'd.
+// It has no dedicated Redis key.
+const VIRTUAL_TIERS = new Set(['warm']);
+const VALID_TIERS = new Set(['hot', 'cold', 'legacy', 'warm']);
+const BLOB_MEMO_TTL_MS = 5 * 1000; // tiny in-process memo to avoid reparsing ~2MB JSON on every request
+
 class MediaModel {
   constructor() {
-    this.cacheKey = process.env.REDIS_CACHE_KEY || 'media_radar_cache';
+    // Kept for backwards-compat (referenced by some scripts/diagnostics). The
+    // tiered logic below does NOT consult this value — it uses CACHE_KEYS.
+    this.cacheKey = process.env.REDIS_CACHE_KEY || CACHE_KEYS.legacy;
+    this._blobMemo = new Map(); // tier -> { ts, data }
+
+    // Per-tier circuit breaker. A failing `:hot` must not starve `:cold`.
+    // Tunable via env for ops; sensible defaults for a small service.
+    this._breaker = new CircuitBreaker({
+      failureThreshold: parseInt(process.env.REDIS_BREAKER_FAILURES || '3', 10),
+      windowMs: parseInt(process.env.REDIS_BREAKER_WINDOW_MS || '10000', 10),
+      openDurationMs: parseInt(process.env.REDIS_BREAKER_OPEN_MS || '20000', 10),
+      onStateChange: ({ key, prev, next }) => {
+        console.warn(`[MediaModel] circuit breaker ${key}: ${prev} -> ${next}`);
+      },
+    });
+  }
+
+  /** Resolve an incoming tier hint to one of `hot|cold|legacy|warm`. */
+  resolveTier(tier, fallback = 'cold') {
+    if (!tier) return fallback;
+    const t = String(tier).toLowerCase();
+    return VALID_TIERS.has(t) ? t : fallback;
+  }
+
+  cacheKeyForTier(tier) {
+    const resolved = this.resolveTier(tier);
+    if (resolved === 'warm') return 'media_radar_cache:warm'; // virtual
+    return CACHE_KEYS[resolved] || CACHE_KEYS.legacy;
+  }
+
+  /** Expose breaker inspection for /health and diagnostics. */
+  breakerStatus() {
+    const out = {};
+    for (const tier of Object.keys(CACHE_KEYS)) {
+      out[tier] = this._breaker.inspect(tier);
+    }
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -199,17 +258,276 @@ class MediaModel {
   // Redis fetch
   // -------------------------------------------------------------------------
 
-  async getAllMedia() {
+  /**
+   * Fetch the raw unified blob for a tier. Falls back gracefully:
+   *   hot -> cold -> legacy
+   *   cold -> legacy -> hot
+   *   legacy -> cold -> hot
+   * so that a missing :hot or :cold key (e.g. during the cold crawler's first
+   * run) never surfaces as an empty UI.
+   *
+   * Uses a short in-process memo (BLOB_MEMO_TTL_MS) because the cold blob is
+   * ~1.1MB and repeatedly JSON.parse()'ing it per request is wasteful.
+   */
+  async getAllMedia(tier = 'cold') {
     if (!db.isConnected()) {
       throw new Error('Redis is not connected');
     }
 
-    const cachedData = await db.redisClient.get(this.cacheKey);
-    if (!cachedData) {
-      throw new Error('No media data found in cache');
+    const resolved = this.resolveTier(tier);
+
+    // Virtual tier: merge hot ∪ cold on the fly. If one side is down the
+    // other is used as-is. Both sides memo'd individually so the union is
+    // cheap on repeated calls.
+    if (resolved === 'warm') {
+      return this._getWarmBlob();
     }
 
-    return JSON.parse(cachedData);
+    const order = resolved === 'hot'
+      ? ['hot', 'cold', 'legacy']
+      : resolved === 'cold'
+        ? ['cold', 'legacy', 'hot']
+        : ['legacy', 'cold', 'hot'];
+
+    let lastErr = null;
+    for (const t of order) {
+      try {
+        const data = await this._fetchBlobForTier(t);
+        if (data) {
+          if (t !== resolved) {
+            console.warn(`[MediaModel] tier=${resolved} unavailable, served from ${t} (${CACHE_KEYS[t]})`);
+          }
+          // Stamp the effective tier so downstream code/UI can tell.
+          if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+            data.__tier = t;
+            data.__cacheKey = CACHE_KEYS[t];
+          }
+          return data;
+        }
+      } catch (err) {
+        lastErr = err;
+        // If breaker is open for this tier, keep walking the fallback chain.
+        if (err instanceof CircuitBreakerOpenError) continue;
+      }
+    }
+    throw lastErr || new Error('No media data found in cache (all tiers empty)');
+  }
+
+  async _fetchBlobForTier(tier) {
+    const key = CACHE_KEYS[tier];
+    if (!key) return null;
+
+    const memo = this._blobMemo.get(tier);
+    if (memo && (Date.now() - memo.ts) < BLOB_MEMO_TTL_MS) {
+      return memo.data;
+    }
+
+    // Guard the actual Redis GET + JSON.parse with the breaker. Parse errors
+    // count as failures, which is what we want — a corrupt blob should trip
+    // the breaker and let us fail over to another tier.
+    return this._breaker.exec(tier, async () => {
+      const raw = await db.redisClient.get(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      this._blobMemo.set(tier, { ts: Date.now(), data: parsed });
+      return parsed;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Warm tier — app-side union of hot ∪ cold
+  //
+  // Semantics:
+  //   - movies / tvshows:    hot wins on title-key collisions for top-level
+  //                          wrapper metadata (type/year/posterUrl/sources),
+  //                          BUT qualities/files are unioned with dedup so we
+  //                          keep every link we know about.
+  //   - sections.oneTamilMv: hot's sections are preferred (they're the
+  //                          curated fresh list); cold's are only used when
+  //                          hot has none.
+  //   - metadata:            hot metadata is surfaced as the "primary" (it's
+  //                          freshest). Cold metadata is exposed under
+  //                          `metadata.coldOverlay` for diagnostics.
+  //
+  // Cost: one-time merge per ~5s (the blob memo window). Repeated warm reads
+  // within that window hit the memoized merge result.
+  // -------------------------------------------------------------------------
+  async _getWarmBlob() {
+    const memo = this._blobMemo.get('warm');
+    if (memo && (Date.now() - memo.ts) < BLOB_MEMO_TTL_MS) {
+      return memo.data;
+    }
+
+    // Fetch both tiers in parallel. Tolerate either side being down.
+    const [hot, cold] = await Promise.all([
+      this._fetchBlobForTier('hot').catch(err => { console.warn('[warm] hot fetch failed:', err.message); return null; }),
+      this._fetchBlobForTier('cold').catch(err => { console.warn('[warm] cold fetch failed:', err.message); return null; }),
+    ]);
+
+    if (!hot && !cold) {
+      // Try legacy as a last resort
+      const legacy = await this._fetchBlobForTier('legacy').catch(() => null);
+      if (!legacy) throw new Error('Warm tier unavailable: hot, cold, and legacy are all empty');
+      legacy.__tier = 'warm';
+      legacy.__cacheKey = 'media_radar_cache:warm';
+      legacy.__composition = { hot: false, cold: false, legacy: true };
+      return legacy;
+    }
+
+    const merged = this._mergeHotCold(hot, cold);
+    merged.__tier = 'warm';
+    merged.__cacheKey = 'media_radar_cache:warm';
+    merged.__composition = { hot: !!hot, cold: !!cold };
+
+    this._blobMemo.set('warm', { ts: Date.now(), data: merged });
+    return merged;
+  }
+
+  /**
+   * Merge two wrapper-shaped blobs. Null-safe. Deterministic (hot wins on
+   * scalar conflicts). Pure — never mutates inputs.
+   */
+  _mergeHotCold(hot, cold) {
+    if (!hot) return cold;
+    if (!cold) return hot;
+
+    const merged = {
+      movies: this._mergeMediaMap(hot.movies, cold.movies),
+      tvshows: this._mergeMediaMap(hot.tvshows, cold.tvshows),
+      sections: this._mergeSections(hot.sections, cold.sections),
+      metadata: {
+        ...(hot.metadata || {}),
+        mode: 'warm',
+        source: 'warm[hot ∪ cold]',
+        composedAt: new Date().toISOString(),
+        coldOverlay: cold.metadata || null,
+        hotOverlay: hot.metadata || null,
+        lastUpdated: this._laterOf(hot?.metadata?.lastUpdated, cold?.metadata?.lastUpdated),
+      },
+    };
+    return merged;
+  }
+
+  _laterOf(a, b) {
+    const ta = Date.parse(a || 0) || 0;
+    const tb = Date.parse(b || 0) || 0;
+    return ta >= tb ? (a || b) : (b || a);
+  }
+
+  _mergeSections(hotSections, coldSections) {
+    if (!hotSections && !coldSections) return undefined;
+    if (!hotSections) return coldSections;
+    if (!coldSections) return hotSections;
+    const out = { ...coldSections, ...hotSections }; // hot wins on key collision
+    if (hotSections.oneTamilMv || coldSections.oneTamilMv) {
+      out.oneTamilMv = { ...(coldSections.oneTamilMv || {}), ...(hotSections.oneTamilMv || {}) };
+    }
+    return out;
+  }
+
+  _mergeMediaMap(hotMap, coldMap) {
+    const out = {};
+    const keys = new Set([...Object.keys(hotMap || {}), ...Object.keys(coldMap || {})]);
+    for (const key of keys) {
+      const h = hotMap ? hotMap[key] : null;
+      const c = coldMap ? coldMap[key] : null;
+      if (h && !c) { out[key] = h; continue; }
+      if (c && !h) { out[key] = c; continue; }
+      out[key] = this._mergeEntry(h, c);
+    }
+    return out;
+  }
+
+  _mergeEntry(hot, cold) {
+    // Wrapper scalars: hot wins; but poster/year fall back to cold if hot is empty.
+    const wrapper = {
+      ...(cold || {}),
+      ...(hot || {}),
+      posterUrl: hot?.posterUrl || cold?.posterUrl,
+      year: hot?.year || cold?.year,
+      type: hot?.type || cold?.type,
+      sources: Array.from(new Set([...(hot?.sources || []), ...(cold?.sources || [])])),
+      firstSeenAt: this._earlierOf(hot?.firstSeenAt, cold?.firstSeenAt),
+      lastUpdatedAt: this._laterOf(hot?.lastUpdatedAt, cold?.lastUpdatedAt),
+      qualities: this._mergeQualityMaps(
+        this.getQualityMap(hot),
+        this.getQualityMap(cold)
+      ),
+    };
+    return wrapper;
+  }
+
+  _earlierOf(a, b) {
+    const ta = Date.parse(a || 0) || 0;
+    const tb = Date.parse(b || 0) || 0;
+    if (!ta) return b || a;
+    if (!tb) return a || b;
+    return ta <= tb ? a : b;
+  }
+
+  _mergeQualityMaps(hotQ, coldQ) {
+    const qualities = new Set([
+      ...Object.keys(hotQ || {}),
+      ...Object.keys(coldQ || {}),
+    ]);
+    const out = {};
+    for (const q of qualities) {
+      const hb = hotQ ? hotQ[q] : null;
+      const cb = coldQ ? coldQ[q] : null;
+      out[q] = this._mergeQualityBucket(hb, cb);
+    }
+    return out;
+  }
+
+  _mergeQualityBucket(hotBucket, coldBucket) {
+    // Normalise both sides to the new {direct,torrent,magnet} shape so the
+    // merge is uniform.
+    const norm = (bucket) => {
+      if (!bucket) return { direct: [], torrent: [], magnet: [] };
+      if (Array.isArray(bucket)) {
+        // Legacy flat array — bucket by kind if present, else direct.
+        const out = { direct: [], torrent: [], magnet: [] };
+        for (const f of bucket) {
+          const k = (f && f.kind) || 'direct';
+          (out[k] || out.direct).push(f);
+        }
+        return out;
+      }
+      return {
+        direct: Array.isArray(bucket.direct) ? bucket.direct : [],
+        torrent: Array.isArray(bucket.torrent) ? bucket.torrent : [],
+        magnet: Array.isArray(bucket.magnet) ? bucket.magnet : [],
+      };
+    };
+    const h = norm(hotBucket);
+    const c = norm(coldBucket);
+    return {
+      direct: this.deduplicateFiles([...h.direct, ...c.direct]),
+      torrent: this.deduplicateFiles([...h.torrent, ...c.torrent]),
+      magnet: this.deduplicateFiles([...h.magnet, ...c.magnet]),
+    };
+  }
+
+  /** Expose which Redis keys are currently hydrated. Useful for health checks. */
+  async describeTiers() {
+    if (!db.isConnected()) return { connected: false, tiers: {}, breaker: this.breakerStatus() };
+    const out = { connected: true, tiers: {}, breaker: this.breakerStatus() };
+    for (const [tier, key] of Object.entries(CACHE_KEYS)) {
+      try {
+        const exists = await db.redisClient.exists(key);
+        out.tiers[tier] = { key, exists: exists === 1 };
+      } catch (err) {
+        out.tiers[tier] = { key, exists: false, error: err.message };
+      }
+    }
+    // Surface the virtual `warm` tier – it's "available" iff hot or cold is.
+    out.tiers.warm = {
+      key: 'media_radar_cache:warm (virtual)',
+      virtual: true,
+      exists: !!(out.tiers.hot?.exists || out.tiers.cold?.exists),
+      composedFrom: ['hot', 'cold'],
+    };
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -256,9 +574,14 @@ class MediaModel {
     if (typeof options === 'boolean') {
       options = { excludeTopReleases: arguments[3], language: arguments[4] };
     }
-    const { excludeTopReleases = false, language = null, source = null } = options;
+    const {
+      excludeTopReleases = false,
+      language = null,
+      source = null,
+      tier = 'cold', // "all" / paginated catalog = COLD blob
+    } = options;
 
-    const rawData = await this.getAllMedia();
+    const rawData = await this.getAllMedia(tier);
     const offset = (page - 1) * limit;
 
     // Resolve the bucket of entries for the requested type.
@@ -347,10 +670,15 @@ class MediaModel {
         totalInRedis: Object.keys(mediaObj).length,
         filteredCount: totalItems,
         source: source || 'all',
+        tier: rawData && rawData.__tier ? rawData.__tier : this.resolveTier(tier),
+        cacheKey: rawData && rawData.__cacheKey ? rawData.__cacheKey : this.cacheKeyForTier(tier),
         cacheMetadata: rawData && rawData.metadata ? {
           lastUpdated: rawData.metadata.lastUpdated,
+          expiresAt: rawData.metadata.expiresAt,
           version: rawData.metadata.version,
           source: rawData.metadata.source,
+          mode: rawData.metadata.mode,
+          codeVersion: rawData.metadata.codeVersion,
         } : undefined,
       },
     };
@@ -390,12 +718,12 @@ class MediaModel {
   }
 
   async searchMedia(type, query, page = 1, limit = 20, options = {}) {
-    const { source = null } = options;
-    const { entries } = await this.getMediaByType(type, 1, 10000, { source });
+    const { source = null, tier = 'cold' } = options;
+    const { entries } = await this.getMediaByType(type, 1, 10000, { source, tier });
     const offset = (page - 1) * limit;
 
     if (!query || query.trim() === '') {
-      return this.getMediaByType(type, page, limit, { source });
+      return this.getMediaByType(type, page, limit, { source, tier });
     }
 
     const searchTerm = query.toLowerCase().trim();
@@ -444,7 +772,14 @@ class MediaModel {
         hasPrevPage: page > 1,
       },
       search: { query, totalFound: totalFiltered, searchTerm },
-      metadata: { dataStructure: 'search_filtered', totalInRedis: entries.length, filteredCount: totalFiltered, source: source || 'all' },
+      metadata: {
+        dataStructure: 'search_filtered',
+        totalInRedis: entries.length,
+        filteredCount: totalFiltered,
+        source: source || 'all',
+        tier: this.resolveTier(tier),
+        cacheKey: this.cacheKeyForTier(tier),
+      },
     };
   }
 
@@ -455,8 +790,8 @@ class MediaModel {
   }
 
   async getMediaByQuality(type, quality, page = 1, limit = 20, options = {}) {
-    const { source = null } = options;
-    const { entries } = await this.getMediaByType(type, 1, 10000, { source });
+    const { source = null, tier = 'cold' } = options;
+    const { entries } = await this.getMediaByType(type, 1, 10000, { source, tier });
     const offset = (page - 1) * limit;
 
     const filteredEntries = entries.filter(([, entry]) => {
@@ -483,8 +818,8 @@ class MediaModel {
   }
 
   async getMediaByLanguage(type, language, page = 1, limit = 20, options = {}) {
-    const { source = null } = options;
-    const { entries } = await this.getMediaByType(type, 1, 10000, { source });
+    const { source = null, tier = 'cold' } = options;
+    const { entries } = await this.getMediaByType(type, 1, 10000, { source, tier });
     const offset = (page - 1) * limit;
 
     const filteredEntries = entries.filter(([, entry]) => {
@@ -601,12 +936,20 @@ class MediaModel {
   }
 
   async getSpecialSection(type, sectionName, limit = 20, options = {}) {
-    const { source = null } = options;
-    const rawData = await this.getAllMedia();
+    const { source = null, tier = 'hot' } = options; // "latest" surfaces read from HOT by default
+    const rawData = await this.getAllMedia(tier);
 
     const mediaObj = type === 'movies' ? rawData.movies : rawData.tvshows;
     if (!mediaObj) {
-      return { entries: [], count: 0, type: sectionName };
+      return {
+        entries: [],
+        count: 0,
+        type: sectionName,
+        metadata: {
+          tier: rawData && rawData.__tier ? rawData.__tier : this.resolveTier(tier),
+          cacheKey: rawData && rawData.__cacheKey ? rawData.__cacheKey : this.cacheKeyForTier(tier),
+        },
+      };
     }
 
     // For now only 1TamilMV publishes curated sections; hdhub4u has its own
@@ -657,15 +1000,28 @@ class MediaModel {
       entries: deduped,
       count: deduped.length,
       type: sectionName === 'TOP RELEASES THIS WEEK' ? 'topReleases' : 'recentlyAdded',
+      metadata: {
+        tier: rawData && rawData.__tier ? rawData.__tier : this.resolveTier(tier),
+        cacheKey: rawData && rawData.__cacheKey ? rawData.__cacheKey : this.cacheKeyForTier(tier),
+        cacheMetadata: rawData && rawData.metadata ? {
+          lastUpdated: rawData.metadata.lastUpdated,
+          expiresAt: rawData.metadata.expiresAt,
+          version: rawData.metadata.version,
+          mode: rawData.metadata.mode,
+          codeVersion: rawData.metadata.codeVersion,
+        } : undefined,
+      },
     };
   }
 
   async getTopReleases(type, limit = 10, options = {}) {
-    return this.getSpecialSection(type, 'TOP RELEASES THIS WEEK', limit, options);
+    // Latest surface -> HOT by default
+    return this.getSpecialSection(type, 'TOP RELEASES THIS WEEK', limit, { tier: 'hot', ...options });
   }
 
   async getRecentlyAdded(type, limit = 20, options = {}) {
-    return this.getSpecialSection(type, 'RECENTLY ADDED', limit, options);
+    // Latest surface -> HOT by default
+    return this.getSpecialSection(type, 'RECENTLY ADDED', limit, { tier: 'hot', ...options });
   }
 
   // -------------------------------------------------------------------------
@@ -685,4 +1041,5 @@ class MediaModel {
 const instance = new MediaModel();
 instance.SUPPORTED_SOURCES = SUPPORTED_SOURCES;
 instance.QUALITY_ORDER = QUALITY_ORDER;
+instance.CACHE_KEYS = CACHE_KEYS;
 module.exports = instance;

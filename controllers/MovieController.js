@@ -1,16 +1,35 @@
 const MediaModel = require('../models/MediaModel');
 const MediaService = require('../services/MediaService');
+const ResponseCache = require('../helpers/responseCache');
+const { applyTierHeaders } = require('../helpers/cacheHeaders');
+
+// Accept hot / cold / warm from query string. `warm` = hot ∪ cold merged view.
+function sanitizeTier(raw, fallback) {
+  if (!raw) return fallback;
+  const t = String(raw).toLowerCase();
+  return (t === 'hot' || t === 'cold' || t === 'warm') ? t : fallback;
+}
+
+// Shared cache across all movie endpoints (singleton). Exported via module
+// for /health and invalidation from the analysis routes if needed.
+const responseCache = new ResponseCache({
+  maxEntries: parseInt(process.env.RESP_CACHE_MAX || '200', 10),
+  freshTtlMs: parseInt(process.env.RESP_CACHE_FRESH_MS || '15000', 10),
+  staleTtlMs: parseInt(process.env.RESP_CACHE_STALE_MS || '60000', 10),
+});
 
 class MovieController {
-  // Get movies with pagination
+  // Get movies with pagination (default tier: COLD = "all" catalog)
   async getMovies(req, res) {
     try {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
       const language = req.query.language || null;
       const source = req.query.source || null;
+      const tier = sanitizeTier(req.query.tier, 'cold');
+      const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
-      console.log(`Movie API request - Page: ${page}, Limit: ${limit}${language ? `, Language: ${language}` : ''}${source ? `, Source: ${source}` : ''}`);
+      console.log(`Movie API request - Page: ${page}, Limit: ${limit}, Tier: ${tier}${language ? `, Language: ${language}` : ''}${source ? `, Source: ${source}` : ''}`);
 
       const startTime = Date.now();
       // Exclude top releases from main movie list to avoid duplicates
@@ -18,31 +37,64 @@ class MovieController {
         excludeTopReleases: true,
         language,
         source,
+        tier,
       });
-      
-      const transformedMovies = await MediaService.transformMediaEntries(
-        result.entries, 
-        (page - 1) * limit, 
-        'movie'
-      );
-      
+
+      const effectiveTier = result.metadata?.tier || tier;
+      const cacheKey = result.metadata?.cacheKey;
+      const version = result.metadata?.cacheMetadata?.lastUpdated;
+
+      const rcKey = ResponseCache.buildKey('movies:list', {
+        page, limit, language, source, tier: effectiveTier, v: version,
+      });
+
+      // Loader runs the expensive bit: TMDB/OMDB enrichment.
+      const loader = async () => {
+        const transformedMovies = await MediaService.transformMediaEntries(
+          result.entries,
+          (page - 1) * limit,
+          'movie'
+        );
+        return {
+          movies: transformedMovies,
+          pagination: {
+            ...result.pagination,
+            totalMovies: result.pagination.totalItems,
+            moviesPerPage: result.pagination.itemsPerPage,
+          },
+          metadata: { ...result.metadata },
+        };
+      };
+
+      const cached = bypassCache
+        ? await responseCache.runBypass(loader, { tier: effectiveTier, version })
+        : await responseCache.get(rcKey, loader, { tier: effectiveTier, version });
+
       const totalTime = Date.now() - startTime;
-      console.log(`⚡ Total movie processing time: ${totalTime}ms`);
-      console.log(`🎉 Transformed ${transformedMovies.length} movies for page ${page}`);
-      
-      res.json({
-        movies: transformedMovies,
-        pagination: {
-          ...result.pagination,
-          totalMovies: result.pagination.totalItems,
-          moviesPerPage: result.pagination.itemsPerPage
-        },
-        metadata: {
-          ...result.metadata,
-          processingTimeMs: totalTime
-        }
+      console.log(`⚡ Movies ${cached.source} (age=${cached.ageMs ?? 0}ms, total=${totalTime}ms)`);
+
+      const aborted = applyTierHeaders(req, res, {
+        tier: effectiveTier,
+        cacheKey,
+        version,
+        etag: cached.etag,
+        source: cached.source,
+        ageMs: cached.ageMs,
+        servedFromFallback: result.metadata?.tier && tier !== result.metadata.tier,
+        breakerState: MediaModel.breakerStatus()[effectiveTier]?.state,
       });
-      
+      if (aborted) return;
+
+      res.json({
+        ...cached.payload,
+        metadata: {
+          ...(cached.payload.metadata || {}),
+          processingTimeMs: totalTime,
+          responseSource: cached.source,
+          responseAgeMs: cached.ageMs,
+        },
+      });
+
     } catch (error) {
       console.error('Error in MovieController.getMovies:', error);
       
@@ -84,43 +136,70 @@ class MovieController {
     }
   }
 
-  // Search movies with pagination
+  // Search movies with pagination (default tier: COLD = search the full catalog)
   async searchMovies(req, res) {
     try {
       const query = req.query.q || '';
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
       const source = req.query.source || null;
+      const tier = sanitizeTier(req.query.tier, 'cold');
+      const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
-      console.log(`🔍 Movie search request - Query: "${query}", Page: ${page}, Limit: ${limit}${source ? `, Source: ${source}` : ''}`);
+      console.log(`🔍 Movie search request - Query: "${query}", Page: ${page}, Limit: ${limit}, Tier: ${tier}${source ? `, Source: ${source}` : ''}`);
 
       const startTime = Date.now();
-      const result = await MediaModel.searchMedia('movies', query, page, limit, { source });
-      
-      const transformedMovies = await MediaService.transformMediaEntries(
-        result.entries, 
-        (page - 1) * limit, 
-        'movie'
-      );
-      
+      const result = await MediaModel.searchMedia('movies', query, page, limit, { source, tier });
+
+      const effectiveTier = result.metadata?.tier || tier;
+      const cacheKey = result.metadata?.cacheKey;
+      const version = result.metadata?.cacheMetadata?.lastUpdated;
+      const rcKey = ResponseCache.buildKey('movies:search', { q: query, page, limit, source, tier: effectiveTier, v: version });
+
+      const loader = async () => {
+        const transformedMovies = await MediaService.transformMediaEntries(
+          result.entries, (page - 1) * limit, 'movie'
+        );
+        return {
+          movies: transformedMovies,
+          pagination: {
+            ...result.pagination,
+            totalMovies: result.pagination.totalItems,
+            moviesPerPage: result.pagination.itemsPerPage,
+          },
+          search: result.search,
+          metadata: { ...result.metadata },
+        };
+      };
+
+      const cached = bypassCache
+        ? await responseCache.runBypass(loader, { tier: effectiveTier, version })
+        : await responseCache.get(rcKey, loader, { tier: effectiveTier, version });
+
       const totalTime = Date.now() - startTime;
-      console.log(`⚡ Total movie search processing time: ${totalTime}ms`);
-      console.log(`🎉 Found ${transformedMovies.length} movies matching "${query}" for page ${page}`);
-      
-      res.json({
-        movies: transformedMovies,
-        pagination: {
-          ...result.pagination,
-          totalMovies: result.pagination.totalItems,
-          moviesPerPage: result.pagination.itemsPerPage
-        },
-        search: result.search,
-        metadata: {
-          ...result.metadata,
-          processingTimeMs: totalTime
-        }
+      console.log(`⚡ Movie search ${cached.source} (age=${cached.ageMs ?? 0}ms, total=${totalTime}ms) -> ${cached.payload.movies.length}`);
+
+      const aborted = applyTierHeaders(req, res, {
+        tier: effectiveTier,
+        cacheKey,
+        version,
+        etag: cached.etag,
+        source: cached.source,
+        ageMs: cached.ageMs,
+        breakerState: MediaModel.breakerStatus()[effectiveTier]?.state,
       });
-      
+      if (aborted) return;
+
+      res.json({
+        ...cached.payload,
+        metadata: {
+          ...(cached.payload.metadata || {}),
+          processingTimeMs: totalTime,
+          responseSource: cached.source,
+          responseAgeMs: cached.ageMs,
+        },
+      });
+
     } catch (error) {
       console.error('Error in MovieController.searchMovies:', error);
       
@@ -221,36 +300,62 @@ class MovieController {
     }
   }
 
-  // Get top releases (movies released this week)
+  // Get top releases (movies released this week). Default tier: HOT = "latest".
   async getTopReleases(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 10;
       const source = req.query.source || null;
+      const tier = sanitizeTier(req.query.tier, 'hot');
+      const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
-      console.log(`🔥 Fetching top movie releases (limit: ${limit}${source ? `, source: ${source}` : ''})`);
+      console.log(`🔥 Fetching top movie releases (tier: ${tier}, limit: ${limit}${source ? `, source: ${source}` : ''})`);
 
       const startTime = Date.now();
-      const result = await MediaModel.getTopReleases('movies', limit, { source });
-      
-      const transformedMovies = await MediaService.transformMediaEntries(
-        result.entries,
-        0,
-        'movie'
-      );
-      
+      const result = await MediaModel.getTopReleases('movies', limit, { source, tier });
+
+      const effectiveTier = result.metadata?.tier || tier;
+      const cacheKey = result.metadata?.cacheKey;
+      const version = result.metadata?.cacheMetadata?.lastUpdated;
+      const rcKey = ResponseCache.buildKey('movies:top', { limit, source, tier: effectiveTier, v: version });
+
+      const loader = async () => {
+        const transformedMovies = await MediaService.transformMediaEntries(result.entries, 0, 'movie');
+        return {
+          movies: transformedMovies,
+          count: transformedMovies.length,
+          type: 'topReleases',
+          metadata: { ...(result.metadata || {}) },
+        };
+      };
+
+      const cached = bypassCache
+        ? await responseCache.runBypass(loader, { tier: effectiveTier, version })
+        : await responseCache.get(rcKey, loader, { tier: effectiveTier, version });
+
       const totalTime = Date.now() - startTime;
-      console.log(`⚡ Top releases processing time: ${totalTime}ms`);
-      console.log(`🎉 Found ${transformedMovies.length} top release movies`);
-      
-      res.json({
-        movies: transformedMovies,
-        count: transformedMovies.length,
-        type: 'topReleases',
-        metadata: {
-          processingTimeMs: totalTime
-        }
+      console.log(`⚡ Top releases ${cached.source} (age=${cached.ageMs ?? 0}ms, total=${totalTime}ms) -> ${cached.payload.count}`);
+
+      const aborted = applyTierHeaders(req, res, {
+        tier: effectiveTier,
+        cacheKey,
+        version,
+        etag: cached.etag,
+        source: cached.source,
+        ageMs: cached.ageMs,
+        breakerState: MediaModel.breakerStatus()[effectiveTier]?.state,
       });
-      
+      if (aborted) return;
+
+      res.json({
+        ...cached.payload,
+        metadata: {
+          ...(cached.payload.metadata || {}),
+          processingTimeMs: totalTime,
+          responseSource: cached.source,
+          responseAgeMs: cached.ageMs,
+        },
+      });
+
     } catch (error) {
       console.error('Error in MovieController.getTopReleases:', error);
       
@@ -262,36 +367,62 @@ class MovieController {
     }
   }
 
-  // Get recently added movies
+  // Get recently added movies. Default tier: HOT = "latest".
   async getRecentlyAdded(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 20;
       const source = req.query.source || null;
+      const tier = sanitizeTier(req.query.tier, 'hot');
+      const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
-      console.log(`📅 Fetching recently added movies (limit: ${limit}${source ? `, source: ${source}` : ''})`);
+      console.log(`📅 Fetching recently added movies (tier: ${tier}, limit: ${limit}${source ? `, source: ${source}` : ''})`);
 
       const startTime = Date.now();
-      const result = await MediaModel.getRecentlyAdded('movies', limit, { source });
-      
-      const transformedMovies = await MediaService.transformMediaEntries(
-        result.entries,
-        0,
-        'movie'
-      );
-      
+      const result = await MediaModel.getRecentlyAdded('movies', limit, { source, tier });
+
+      const effectiveTier = result.metadata?.tier || tier;
+      const cacheKey = result.metadata?.cacheKey;
+      const version = result.metadata?.cacheMetadata?.lastUpdated;
+      const rcKey = ResponseCache.buildKey('movies:recent', { limit, source, tier: effectiveTier, v: version });
+
+      const loader = async () => {
+        const transformedMovies = await MediaService.transformMediaEntries(result.entries, 0, 'movie');
+        return {
+          movies: transformedMovies,
+          count: transformedMovies.length,
+          type: 'recentlyAdded',
+          metadata: { ...(result.metadata || {}) },
+        };
+      };
+
+      const cached = bypassCache
+        ? await responseCache.runBypass(loader, { tier: effectiveTier, version })
+        : await responseCache.get(rcKey, loader, { tier: effectiveTier, version });
+
       const totalTime = Date.now() - startTime;
-      console.log(`⚡ Recently added processing time: ${totalTime}ms`);
-      console.log(`🎉 Found ${transformedMovies.length} recently added movies`);
-      
-      res.json({
-        movies: transformedMovies,
-        count: transformedMovies.length,
-        type: 'recentlyAdded',
-        metadata: {
-          processingTimeMs: totalTime
-        }
+      console.log(`⚡ Recently added ${cached.source} (age=${cached.ageMs ?? 0}ms, total=${totalTime}ms) -> ${cached.payload.count}`);
+
+      const aborted = applyTierHeaders(req, res, {
+        tier: effectiveTier,
+        cacheKey,
+        version,
+        etag: cached.etag,
+        source: cached.source,
+        ageMs: cached.ageMs,
+        breakerState: MediaModel.breakerStatus()[effectiveTier]?.state,
       });
-      
+      if (aborted) return;
+
+      res.json({
+        ...cached.payload,
+        metadata: {
+          ...(cached.payload.metadata || {}),
+          processingTimeMs: totalTime,
+          responseSource: cached.source,
+          responseAgeMs: cached.ageMs,
+        },
+      });
+
     } catch (error) {
       console.error('Error in MovieController.getRecentlyAdded:', error);
       
@@ -304,4 +435,6 @@ class MovieController {
   }
 }
 
-module.exports = new MovieController(); 
+const controllerInstance = new MovieController();
+controllerInstance.responseCache = responseCache;
+module.exports = controllerInstance;

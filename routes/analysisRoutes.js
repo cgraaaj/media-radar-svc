@@ -3,6 +3,101 @@ const router = express.Router();
 const db = require('../config/database');
 const { normalizeLanguage } = require('../helpers/utils');
 const MediaModel = require('../models/MediaModel');
+const MovieController = require('../controllers/MovieController');
+
+// Resolve which Redis tier to read for an analysis request.
+// Accepts ?tier=hot|cold|legacy (default cold = "all/catalog" view).
+function pickTier(req, fallback = 'cold') {
+  const raw = (req.query.tier || '').toString().toLowerCase();
+  if (raw === 'hot' || raw === 'cold' || raw === 'legacy') return raw;
+  return fallback;
+}
+
+async function loadTieredBlob(req, fallbackTier = 'cold') {
+  const tier = pickTier(req, fallbackTier);
+  const key = MediaModel.CACHE_KEYS[tier];
+  const raw = await db.redisClient.get(key);
+  if (!raw) {
+    // Secondary fallback chain so a missing :hot doesn't 404 the analyzer.
+    const chain = tier === 'hot'
+      ? ['cold', 'legacy']
+      : tier === 'cold'
+        ? ['legacy', 'hot']
+        : ['cold', 'hot'];
+    for (const alt of chain) {
+      const altRaw = await db.redisClient.get(MediaModel.CACHE_KEYS[alt]);
+      if (altRaw) return { raw: altRaw, tier: alt, key: MediaModel.CACHE_KEYS[alt], servedFromFallback: true };
+    }
+    return null;
+  }
+  return { raw, tier, key, servedFromFallback: false };
+}
+
+// Runtime state of the response cache + breaker (ops-facing)
+router.get('/cache-stats', async (req, res) => {
+  try {
+    const cache = MovieController.responseCache?.snapshot?.() || null;
+    res.json({
+      responseCache: cache,
+      breaker: MediaModel.breakerStatus(),
+      now: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Drop all cached responses (does NOT touch Redis). Useful for forcing a
+// refresh after a manual Redis write.
+router.post('/cache-stats/clear', async (req, res) => {
+  try {
+    const prefix = (req.query.prefix || '').toString();
+    const n = prefix
+      ? MovieController.responseCache.invalidatePrefix(prefix)
+      : MovieController.responseCache.clear();
+    res.json({ cleared: n, prefix: prefix || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Report which cache tiers currently exist (hot / cold / legacy)
+router.get('/cache-tiers', async (req, res) => {
+  try {
+    if (!db.isConnected()) {
+      return res.status(503).json({ error: 'Redis is not connected' });
+    }
+    const describe = await MediaModel.describeTiers();
+    // Enrich with size + metadata for each existing tier
+    for (const [tier, info] of Object.entries(describe.tiers)) {
+      if (!info.exists) continue;
+      try {
+        const raw = await db.redisClient.get(info.key);
+        if (!raw) continue;
+        info.sizeBytes = raw.length;
+        try {
+          const parsed = JSON.parse(raw);
+          info.metadata = parsed?.metadata || null;
+          info.movieCount = parsed?.movies ? Object.keys(parsed.movies).length : 0;
+          info.tvshowCount = parsed?.tvshows ? Object.keys(parsed.tvshows).length : 0;
+          info.sections = parsed?.sections ? Object.keys(parsed.sections) : [];
+        } catch { /* ignore parse errors */ }
+      } catch { /* ignore */ }
+    }
+    res.json({
+      routing: {
+        latestSection: { tier: 'hot', key: MediaModel.CACHE_KEYS.hot, purpose: 'Top Releases / Recently Added' },
+        allSection: { tier: 'cold', key: MediaModel.CACHE_KEYS.cold, purpose: 'Movies / TV Shows paginated catalog + search' },
+        unionView: { tier: 'warm', key: 'media_radar_cache:warm (virtual)', purpose: 'Union of hot ∪ cold (app-side merged, SWR-cached)' },
+        legacyFallback: { tier: 'legacy', key: MediaModel.CACHE_KEYS.legacy, purpose: 'Fallback when :hot/:cold are missing' },
+      },
+      ...describe,
+    });
+  } catch (error) {
+    console.error('Error describing cache tiers:', error);
+    res.status(500).json({ error: 'Failed to describe cache tiers', details: error.message });
+  }
+});
 
 // Get Redis root keys and special sections data
 router.get('/redis-keys', async (req, res) => {
@@ -11,14 +106,17 @@ router.get('/redis-keys', async (req, res) => {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
 
-    const rawData = await db.redisClient.get('media_radar_cache');
-    if (!rawData) {
-      return res.status(404).json({ error: 'No data found in Redis' });
+    const loaded = await loadTieredBlob(req, 'cold');
+    if (!loaded) {
+      return res.status(404).json({ error: 'No data found in Redis for any tier (hot/cold/legacy)' });
     }
-
+    const { raw: rawData, tier, key, servedFromFallback } = loaded;
     const parsedData = JSON.parse(rawData);
 
     const response = {
+      tier,
+      cacheKey: key,
+      servedFromFallback,
       rootKeys: Object.keys(parsedData),
       schemaVersion: parsedData?.metadata?.version || 'legacy',
       sizeBytes: rawData.length,
@@ -60,9 +158,9 @@ router.get('/sources', async (req, res) => {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
 
-    const rawData = await db.redisClient.get('media_radar_cache');
-    if (!rawData) return res.status(404).json({ error: 'No data found in Redis' });
-
+    const loaded = await loadTieredBlob(req, 'cold');
+    if (!loaded) return res.status(404).json({ error: 'No data found in Redis for any tier' });
+    const { raw: rawData, tier, key, servedFromFallback } = loaded;
     const parsed = JSON.parse(rawData);
     const countBy = (obj) => {
       const out = { total: 0, bySource: {}, bySourceWithFiles: {} };
@@ -80,6 +178,9 @@ router.get('/sources', async (req, res) => {
     };
 
     res.json({
+      tier,
+      cacheKey: key,
+      servedFromFallback,
       schemaVersion: parsed?.metadata?.version || 'legacy',
       supportedSources: MediaModel.SUPPORTED_SOURCES,
       movies: countBy(parsed.movies),
@@ -87,6 +188,8 @@ router.get('/sources', async (req, res) => {
       sections: parsed.sections ? Object.keys(parsed.sections) : [],
       lastUpdated: parsed?.metadata?.lastUpdated,
       expiresAt: parsed?.metadata?.expiresAt,
+      mode: parsed?.metadata?.mode,
+      codeVersion: parsed?.metadata?.codeVersion,
       stats: parsed?.metadata?.stats,
     });
   } catch (error) {
@@ -101,12 +204,12 @@ router.get('/redis-structure', async (req, res) => {
     if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
-    
-    const rawData = await db.redisClient.get('media_radar_cache');
-    if (!rawData) {
-      return res.status(404).json({ error: 'No data found in Redis' });
+
+    const loaded = await loadTieredBlob(req, 'cold');
+    if (!loaded) {
+      return res.status(404).json({ error: 'No data found in Redis for any tier' });
     }
-    
+    const { raw: rawData, tier, key, servedFromFallback } = loaded;
     const parsedData = JSON.parse(rawData);
     const analysis = {
       dataType: Array.isArray(parsedData) ? 'array' : typeof parsedData,
@@ -237,6 +340,9 @@ router.get('/redis-structure', async (req, res) => {
     
     res.json({
       success: true,
+      tier,
+      cacheKey: key,
+      servedFromFallback,
       analysis: analysis,
       recommendations: recommendations,
       optimizations: {
@@ -268,13 +374,12 @@ router.get('/available-languages', async (req, res) => {
     if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
-    
-    const cachedMovies = await db.redisClient.get('media_radar_cache');
-    if (!cachedMovies) {
-      return res.status(404).json({ error: 'No movies found in cache' });
+
+    const loaded = await loadTieredBlob(req, 'cold');
+    if (!loaded) {
+      return res.status(404).json({ error: 'No movies found in cache (no tier hydrated)' });
     }
-    
-    const rawData = JSON.parse(cachedMovies);
+    const rawData = JSON.parse(loaded.raw);
     // New schema: { movies: {…}, tvshows: {…}, … }. Legacy: flat object.
     const moviesObj = (rawData && typeof rawData === 'object' && rawData.movies && typeof rawData.movies === 'object')
       ? rawData.movies
@@ -302,6 +407,9 @@ router.get('/available-languages', async (req, res) => {
     
     res.json({
       success: true,
+      tier: loaded.tier,
+      cacheKey: loaded.key,
+      servedFromFallback: loaded.servedFromFallback,
       languages: Object.entries(languageCount)
         .sort(([,a], [,b]) => b - a)
         .map(([lang, count]) => ({ language: lang, count })),
@@ -320,35 +428,37 @@ router.get('/available-languages', async (req, res) => {
   }
 });
 
-// Debug Redis data
+// Debug Redis data (?tier=hot|cold|legacy, default cold)
 router.get('/debug-redis', async (req, res) => {
   try {
     if (!db.isConnected()) {
       return res.status(503).json({ error: 'Redis is not connected' });
     }
-    
-    const rawData = await db.redisClient.get('media_radar_cache');
-    if (rawData) {
-      try {
-        const parsedData = JSON.parse(rawData);
-        res.json({
-          success: true,
-          dataType: Array.isArray(parsedData) ? 'array' : typeof parsedData,
-          dataLength: Array.isArray(parsedData) ? parsedData.length : 'N/A',
-          firstItem: Array.isArray(parsedData) && parsedData[0] ? Object.keys(parsedData[0]).slice(0, 5) : 'N/A',
-          rawDataPreview: rawData.substring(0, 500) + '...'
-        });
-      } catch (parseError) {
-        res.json({
-          success: false,
-          error: 'Failed to parse JSON',
-          rawDataPreview: rawData.substring(0, 500) + '...'
-        });
-      }
-    } else {
+
+    const loaded = await loadTieredBlob(req, 'cold');
+    if (!loaded) {
+      return res.json({ success: false, message: 'No data found in Redis for any tier' });
+    }
+    const { raw: rawData, tier, key, servedFromFallback } = loaded;
+    try {
+      const parsedData = JSON.parse(rawData);
+      res.json({
+        success: true,
+        tier,
+        cacheKey: key,
+        servedFromFallback,
+        dataType: Array.isArray(parsedData) ? 'array' : typeof parsedData,
+        dataLength: Array.isArray(parsedData) ? parsedData.length : 'N/A',
+        firstItem: Array.isArray(parsedData) && parsedData[0] ? Object.keys(parsedData[0]).slice(0, 5) : 'N/A',
+        rawDataPreview: rawData.substring(0, 500) + '...'
+      });
+    } catch (parseError) {
       res.json({
         success: false,
-        message: 'No data found in Redis key'
+        tier,
+        cacheKey: key,
+        error: 'Failed to parse JSON',
+        rawDataPreview: rawData.substring(0, 500) + '...'
       });
     }
   } catch (error) {
