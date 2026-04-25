@@ -9,6 +9,7 @@ const tvShowRoutes = require('./routes/tvShowRoutes');
 const analysisRoutes = require('./routes/analysisRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const torrentStatsRoutes = require('./routes/torrentStatsRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 const logger = require('./config/logger');
 const { randomUUID } = require('crypto');
 
@@ -78,6 +79,7 @@ app.use('/api/tvshows', tvShowRoutes);
 app.use('/api/analyze', analysisRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/torrent-stats', torrentStatsRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // Health endpoints
 app.get('/healthz', (req, res) => {
@@ -99,6 +101,7 @@ app.get('/', (req, res) => {
       analysis: '/api/analyze', 
       ai: '/api/ai',
       torrentStats: '/api/torrent-stats',
+      webhooks: '/api/webhooks',
       health: '/healthz', 
       ready: '/readyz' 
     }
