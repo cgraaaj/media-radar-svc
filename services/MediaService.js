@@ -293,6 +293,11 @@ class MediaService {
       host: rawFile.host || null,
       label: rawFile.label || null,
       originalUrl: rawFile.originalUrl || null,
+      // Stable redirector URL the frontend should hand to /api/links/resolve
+      // when it needs to convert an ad-gated entry into a final URL on click.
+      // Cold-radar emits both fields with the same value; we surface them both
+      // for forward compatibility (originalUrl predates intermediateUrl).
+      intermediateUrl: rawFile.intermediateUrl || rawFile.originalUrl || null,
       finalUrl: rawFile.finalUrl || null,
       magnetLink: null,
       torrentUrl: null,

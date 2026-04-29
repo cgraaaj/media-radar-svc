@@ -10,6 +10,7 @@ const analysisRoutes = require('./routes/analysisRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const torrentStatsRoutes = require('./routes/torrentStatsRoutes');
 const webhookRoutes = require('./routes/webhookRoutes');
+const linksRoutes = require('./routes/linksRoutes');
 const logger = require('./config/logger');
 const { randomUUID } = require('crypto');
 
@@ -80,6 +81,7 @@ app.use('/api/analyze', analysisRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/torrent-stats', torrentStatsRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/links', linksRoutes);
 
 // Health endpoints
 app.get('/healthz', (req, res) => {

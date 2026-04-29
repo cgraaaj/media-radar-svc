@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { CircuitBreaker, CircuitBreakerOpenError } = require('../helpers/circuitBreaker');
+const { isTvTitle, TV_FRANCHISE_RE } = require('../helpers/tvFranchises');
 
 // ---------------------------------------------------------------------------
 // Cache schema (produced by the unified crawler, version >= 3.0)
@@ -413,9 +414,105 @@ class MediaModel {
       const raw = await db.redisClient.get(key);
       if (!raw) return null;
       const parsed = JSON.parse(raw);
+      // App-level safety net: move WWE/Bigg Boss/MasterChef/etc. out of
+      // `movies` and into `tvshows`. Done once per (re-)parse and cached on
+      // the parsed blob via _blobMemo so subsequent reads pay nothing.
+      // Removable once the upstream cold crawler has refreshed Redis.
+      this._reclassifyMisplacedTvShows(parsed, tier);
       this._blobMemo.set(tier, { ts: Date.now(), data: parsed });
       return parsed;
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Reclassification safety net
+  //
+  // Upstream scrapers (n8n + cold-radar) split items into movies/tvshows at
+  // ingest time using a /S\d|Season|Episode/ regex. Reality TV (Bigg Boss,
+  // MasterChef) and weekly events (WWE Smackdown) don't carry those markers,
+  // so they leak into `data.movies`. We use the shared TV-franchise list
+  // (backend/helpers/tvFranchises.js) to pick those leaks out and move them
+  // into `data.tvshows` on read.
+  //
+  // Properties:
+  //   - Idempotent: stamps `entry.__reclassified=true`; running again is a
+  //     no-op. The merge code in _mergeHotCold preserves this stamp.
+  //   - Cheap: single pass over `data.movies` keys; the franchise regex is
+  //     precompiled once at module load time.
+  //   - Removable: once upstream is fixed and the cold blob refreshes, this
+  //     method becomes a no-op (the regex won't match anything in `movies`).
+  //   - Mutates the parsed blob in place so it gets cached by `_blobMemo`.
+  // -------------------------------------------------------------------------
+  _reclassifyMisplacedTvShows(blob, tier = 'unknown') {
+    if (!blob || typeof blob !== 'object') return;
+    const movies = blob.movies;
+    if (!movies || typeof movies !== 'object') return;
+    if (!blob.tvshows || typeof blob.tvshows !== 'object') blob.tvshows = {};
+
+    let moved = 0;
+    let scanned = 0;
+
+    for (const key of Object.keys(movies)) {
+      const entry = movies[key];
+      scanned++;
+      if (!entry || typeof entry !== 'object') continue;
+      // Already-reclassified or wrapper that explicitly says it's a movie?
+      // The wrapper `type` is informational; we trust the franchise regex
+      // over a stale `type` since the upstream is what we're correcting.
+      if (entry.__reclassified === true) continue;
+
+      // Match against the canonical key first (cheapest), then fall back to
+      // any filename inside the entry's quality buckets.
+      let isTv = isTvTitle(key);
+      if (!isTv) {
+        const qmap = this.getQualityMap(entry);
+        outer: for (const bucket of Object.values(qmap || {})) {
+          for (const file of this.flattenBucket(bucket)) {
+            if (file && (
+              isTvTitle(file.filename) ||
+              isTvTitle(file.postTitle) ||
+              isTvTitle(file.pageTitle)
+            )) {
+              isTv = true;
+              break outer;
+            }
+          }
+        }
+      }
+      if (!isTv) continue;
+
+      // Move to tvshows (preserve existing tvshows entry if any — merge
+      // qualities so we don't accidentally lose downloads).
+      const existing = blob.tvshows[key];
+      if (existing && typeof existing === 'object') {
+        blob.tvshows[key] = this._mergeEntry(entry, existing);
+      } else {
+        blob.tvshows[key] = entry;
+      }
+      blob.tvshows[key].type = 'tv';
+      blob.tvshows[key].__reclassified = true;
+      delete movies[key];
+      moved++;
+    }
+
+    if (moved > 0) {
+      blob.__reclassifyStats = {
+        scannedMovies: scanned,
+        movedToTvShows: moved,
+        at: new Date().toISOString(),
+        tier,
+      };
+      console.info(
+        `[MediaModel] reclassifier(tier=${tier}): moved ${moved}/${scanned} movies -> tvshows`
+      );
+    } else if (!blob.__reclassifyStats) {
+      blob.__reclassifyStats = {
+        scannedMovies: scanned,
+        movedToTvShows: 0,
+        at: new Date().toISOString(),
+        tier,
+      };
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -959,6 +1056,9 @@ class MediaModel {
       if (t === 'movie' || t === 'movies') return 'movies';
     }
 
+    // Standard episodic markers + the shared franchise regex (covers reality
+    // TV / weekly events that don't carry S\d/Season markers — see
+    // backend/helpers/tvFranchises.js).
     const tvIndicators = [
       /\bS\d+/i,
       /\bSeason\s+\d+/i,
@@ -967,14 +1067,14 @@ class MediaModel {
       /\bSeries/i,
       /\bComplete\s+Series/i,
     ];
+    if (TV_FRANCHISE_RE) tvIndicators.push(TV_FRANCHISE_RE);
 
-    const keyLower = key.toLowerCase();
-    const hasSeasonEpisode = tvIndicators.some(p => p.test(keyLower));
+    const hasSeasonEpisode = tvIndicators.some(p => p.test(key));
 
     const qmap = this.getQualityMap(data);
     const hasInFiles = Object.values(qmap || {}).some(bucket =>
       this.flattenBucket(bucket).some(file =>
-        file && tvIndicators.some(p => p.test((file.filename || '').toLowerCase()))
+        file && tvIndicators.some(p => p.test(file.filename || ''))
       )
     );
 

@@ -18,6 +18,11 @@ services:
       - OMDB_API_KEY=${OMDB_API_KEY}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      # On-demand link resolver (proxies to cold-radar /resolve).
+      # Leave unset to disable; the /api/links/resolve route will return 503.
+      - COLD_RADAR_URL=${COLD_RADAR_URL:-}
+      - COLD_RADAR_TIMEOUT_MS=${COLD_RADAR_TIMEOUT_MS:-12000}
+      - LINK_RESOLVE_RPM=${LINK_RESOLVE_RPM:-30}
     depends_on:
       - redis
     restart: unless-stopped
