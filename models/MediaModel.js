@@ -98,6 +98,90 @@ class MediaModel {
   }
 
   // -------------------------------------------------------------------------
+  // Display key sanitizer
+  //
+  // Some 1tamilmv topic pages render the title twice inside
+  // `<h1 class="ipsType_pageTitle">` (a visible heading + a hidden span).
+  // Both the n8n hot scraper and the cold-radar Python scraper concatenate
+  // the two text nodes before canonicalizing, which produces broken keys
+  // like:
+  //
+  //   "Nee Forever - - - Esub Nee Forever - - - Esub (2026)"
+  //   "Madhuvidhu - - Clean Audio Madhuvidhu - - Clean Audio (2026)"
+  //
+  // The cosmetic fix lives upstream (process-torrents.js / parser.py), but
+  // until those caches roll over we don't want users staring at junk —
+  // collapse `X X (Year)` shapes here, and trim the trailing dash/noise
+  // suffix that the canonicalizer's noise regex left behind. Pure, idempotent.
+  // -------------------------------------------------------------------------
+  sanitizeDisplayKey(rawKey) {
+    if (!rawKey || typeof rawKey !== 'string') return rawKey;
+
+    let key = rawKey.replace(/\s+/g, ' ').trim();
+
+    // 1) Pull the `(YYYY)` suffix aside so we can clean the title body.
+    const yearMatch = key.match(/^(.*?)\s*(\(\d{4}\))\s*$/);
+    let body = yearMatch ? yearMatch[1].trim() : key;
+    const yearSuffix = yearMatch ? ' ' + yearMatch[2] : '';
+
+    // 2) Strip leaked release-metadata tokens that the upstream canonicalizer
+    //    failed to remove (file sizes, audio/sub markers, dangling brackets).
+    //    Done BEFORE doubling detection so e.g. "Daud 2.6gb Daud 2.6gb" can
+    //    collapse to "Daud Daud" → "Daud".
+    const stripNoise = (s) => s
+      .replace(/\d+(?:\.\d+)?\s*(?:[gmk]b|gib|mib)\b/gi, ' ')   // 2.6gb, 950mb
+      .replace(/&\s*\d+(?:\.\d+)?\s*(?:[gmk]b)/gi, ' ')          // & 950mb
+      .replace(/\b(?:Esub|Hc-?Esub|Hc-?Sub|E-?Sub|Clean\s*Audio|Org\s*Audio|Subbed|Dubbed|Ep|Episode|Eps?)\b/gi, ' ')
+      .replace(/[\[\]{}]/g, ' ')                                 // orphan brackets
+      .replace(/(?:\s*-){2,}/g, ' ')                             // " - - - " → " "
+      .replace(/\s+&\s+/g, ' ')                                  // orphan "&"
+      .replace(/\s+/g, ' ')
+      .trim();
+    body = stripNoise(body);
+
+    // 3) Collapse repeated phrase doubling — works for both "X X" and the
+    //    odd "X - X" variants. Tries:
+    //      a) exact half-equality                               ("Foo Bar Foo Bar")
+    //      b) tokenized half-equality (whitespace/dash tolerant) ("Foo - Foo")
+    //      c) trailing duplicate ("X Y Z Y Z" → "X Y Z")
+    const tokens = body.split(/[\s\-_]+/).filter(Boolean);
+    const halvesEqual = (arr) => {
+      const h = arr.length >> 1;
+      if (h < 1 || arr.length % 2 !== 0) return false;
+      for (let i = 0; i < h; i++) {
+        if (arr[i].toLowerCase() !== arr[i + h].toLowerCase()) return false;
+      }
+      return true;
+    };
+    if (halvesEqual(tokens)) {
+      body = tokens.slice(0, tokens.length >> 1).join(' ');
+    } else {
+      // Greedy: drop the longest trailing repeat-of-prefix.
+      for (let n = Math.floor(tokens.length / 2); n >= 1; n--) {
+        const head = tokens.slice(0, tokens.length - n);
+        const tail = tokens.slice(tokens.length - n);
+        const overlapsHead = tail.every((t, i) =>
+          head[head.length - n + i] && head[head.length - n + i].toLowerCase() === t.toLowerCase()
+        );
+        if (overlapsHead) {
+          body = head.join(' ');
+          break;
+        }
+      }
+    }
+
+    // 4) Final tidy: strip stray punctuation at the edges + collapse runs.
+    body = body
+      .replace(/(?:\s*-){2,}/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s\-_:|.]+|[\s\-_:|.]+$/g, '')
+      .trim();
+
+    if (!body) body = rawKey; // never return empty
+    return body + yearSuffix;
+  }
+
+  // -------------------------------------------------------------------------
   // Schema helpers
   // -------------------------------------------------------------------------
 
@@ -646,12 +730,22 @@ class MediaModel {
       );
     }
 
+    // NOTE: We deliberately preserve the scraper's insertion order for the
+    // hot tier. The 1tamilmv crawler walks the homepage top-to-bottom, so
+    // the natural Object.entries iteration order already reflects "newest
+    // first" as published by the source. Sorting by firstSeenAt/lastUpdatedAt
+    // would clobber this when a single crawl writes a tight burst of
+    // millisecond-spaced timestamps (which is the common case).
+
     const totalItems = filteredEntries.length;
     const totalPages = Math.ceil(totalItems / limit);
     const paginated = filteredEntries.slice(offset, offset + limit);
 
+    // Sanitize broken displayKeys (e.g. "Nee Forever - - - Esub Nee Forever - - - Esub (2026)")
+    // so downstream TMDB/OMDb lookups + UI titles are clean. Defensive — fix
+    // is idempotent if the upstream scraper is later corrected.
     const dedupedEntries = paginated.map(([key, entry]) => [
-      key,
+      this.sanitizeDisplayKey(key),
       this.withDedupedQualities(entry),
     ]);
 
@@ -759,7 +853,10 @@ class MediaModel {
 
     const totalFiltered = filteredEntries.length;
     const paginated = filteredEntries.slice(offset, offset + limit);
-    const dedupedEntries = paginated.map(([key, entry]) => [key, this.withDedupedQualities(entry)]);
+    const dedupedEntries = paginated.map(([key, entry]) => [
+      this.sanitizeDisplayKey(key),
+      this.withDedupedQualities(entry),
+    ]);
 
     return {
       entries: dedupedEntries,
@@ -992,9 +1089,12 @@ class MediaModel {
       }
     }
 
-    const deduped = matched.map(([key, entry]) => [key, this.withDedupedQualities(
-      source && source !== 'all' ? this.filterEntryBySource(entry, source) : entry
-    )]);
+    const deduped = matched.map(([key, entry]) => [
+      this.sanitizeDisplayKey(key),
+      this.withDedupedQualities(
+        source && source !== 'all' ? this.filterEntryBySource(entry, source) : entry
+      ),
+    ]);
 
     return {
       entries: deduped,

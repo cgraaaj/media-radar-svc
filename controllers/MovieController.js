@@ -28,13 +28,19 @@ class MovieController {
       const source = req.query.source || null;
       const tier = sanitizeTier(req.query.tier, 'cold');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
+      // The UI consolidated "Top Releases" + "Recently Added" + catalog into a
+      // single grid (see App.js TIER_COPY comment). Excluding top releases by
+      // default silently dropped the freshest 1tamilmv entries from the
+      // `tier=hot` view. Default off; opt-in via ?excludeTopReleases=1 for any
+      // legacy caller that still wants the slicing.
+      const excludeTopReleases =
+        req.query.excludeTopReleases === '1' || req.query.excludeTopReleases === 'true';
 
-      console.log(`Movie API request - Page: ${page}, Limit: ${limit}, Tier: ${tier}${language ? `, Language: ${language}` : ''}${source ? `, Source: ${source}` : ''}`);
+      console.log(`Movie API request - Page: ${page}, Limit: ${limit}, Tier: ${tier}${language ? `, Language: ${language}` : ''}${source ? `, Source: ${source}` : ''}${excludeTopReleases ? ', excludeTopReleases=true' : ''}`);
 
       const startTime = Date.now();
-      // Exclude top releases from main movie list to avoid duplicates
       const result = await MediaModel.getMediaByType('movies', page, limit, {
-        excludeTopReleases: true,
+        excludeTopReleases,
         language,
         source,
         tier,
@@ -45,7 +51,7 @@ class MovieController {
       const version = result.metadata?.cacheMetadata?.lastUpdated;
 
       const rcKey = ResponseCache.buildKey('movies:list', {
-        page, limit, language, source, tier: effectiveTier, v: version,
+        page, limit, language, source, tier: effectiveTier, exTop: excludeTopReleases ? 1 : 0, v: version,
       });
 
       // Loader runs the expensive bit: TMDB/OMDB enrichment.
