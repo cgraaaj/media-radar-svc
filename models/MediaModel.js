@@ -249,6 +249,69 @@ class MediaModel {
     return n;
   }
 
+  /**
+   * Return a two-part recency key `[tsMs, monotonicId]` for `entry`.
+   *
+   * Primary: max of entry-level `lastUpdatedAt` / `firstSeenAt` and any
+   *          file-level `addedAt` / `shareDate`. Picks up real per-item
+   *          freshness when the upstream materializer preserves it.
+   *
+   * Secondary (tiebreaker): max numeric id extracted from any 1tamilmv forum
+   *          URL we can find on the entry's files. Both `attachment.php?id=N`
+   *          (the most granular per-upload signal) and `/forums/topic/N-`
+   *          (per-post signal) are monotonically increasing on the source
+   *          site, so they double as a chronological order when timestamps
+   *          have been clobbered by a bulk materialization (which is the
+   *          current `cold-radar:pg-materialize` behaviour — every entry
+   *          lands with the same `lastUpdatedAt`).
+   *
+   * HDHub4u URLs have no numeric post id, so their secondary score is 0 and
+   * they fall through to stable-sort insertion order, which reflects the
+   * scraper's homepage walk (already newest-first in practice).
+   */
+  computeRecencyScore(entry) {
+    if (!entry || typeof entry !== 'object') return [0, 0];
+    let tsMs = Math.max(
+      Date.parse(entry.lastUpdatedAt || 0) || 0,
+      Date.parse(entry.firstSeenAt || 0) || 0
+    );
+    let monotonicId = 0;
+
+    const qmap = this.getQualityMap(entry);
+    for (const bucket of Object.values(qmap || {})) {
+      for (const file of this.flattenBucket(bucket)) {
+        if (!file || typeof file !== 'object') continue;
+
+        const ft = Math.max(
+          Date.parse(file.addedAt || 0) || 0,
+          Date.parse(file.shareDate || 0) || 0
+        );
+        if (ft > tsMs) tsMs = ft;
+
+        // Only mine numeric IDs out of 1tamilmv-shaped URLs. Direct/host
+        // URLs on hdhub4u also carry `id=<opaque>` with a base64 payload;
+        // the `\d+`-anchored regexes below intentionally skip those.
+        const urls = [file.torrentUrl, file.postUrl];
+        for (const u of urls) {
+          if (typeof u !== 'string' || !u) continue;
+          // attachment.php?id=147476  -> per-upload monotonic
+          const m1 = u.match(/[?&]id=(\d{4,})(?:&|$)/);
+          if (m1) {
+            const n = parseInt(m1[1], 10);
+            if (n > monotonicId) monotonicId = n;
+          }
+          // /forums/topic/195212-...  -> per-post monotonic
+          const m2 = u.match(/\/(?:forums\/)?topic\/(\d+)/);
+          if (m2) {
+            const n = parseInt(m2[1], 10);
+            if (n > monotonicId) monotonicId = n;
+          }
+        }
+      }
+    }
+    return [tsMs, monotonicId];
+  }
+
   /** Does `entry` contain anything from `source`? (Falls back to scanning files.) */
   entryMatchesSource(entry, source) {
     if (!source || source === 'all') return true;
@@ -827,12 +890,40 @@ class MediaModel {
       );
     }
 
-    // NOTE: We deliberately preserve the scraper's insertion order for the
-    // hot tier. The 1tamilmv crawler walks the homepage top-to-bottom, so
-    // the natural Object.entries iteration order already reflects "newest
-    // first" as published by the source. Sorting by firstSeenAt/lastUpdatedAt
-    // would clobber this when a single crawl writes a tight burst of
-    // millisecond-spaced timestamps (which is the common case).
+    // Order by recency. The cold blob is materialized from Postgres in a
+    // single batch (`cold-radar:pg-materialize`) which stamps every entry
+    // with the *same* `lastUpdatedAt` / `firstSeenAt` / file `addedAt`, so
+    // relying on Object.entries insertion order produced a visibly
+    // shuffled catalog (e.g. 2022 re-uploads interleaved with 2026 drops).
+    //
+    // `computeRecencyScore` returns [tsMs, monotonicId]:
+    //   - tsMs:        primary — picks up any entry whose real `addedAt`
+    //                  survived materialization (fresh edits, hot-tier data).
+    //   - monotonicId: tiebreaker — max numeric forum attachment/topic id
+    //                  mined from 1tamilmv URLs. Always increases over time
+    //                  on the source site, so it cleanly orders a burst of
+    //                  tie-stamped rows. HDHub4u contributes 0 here and
+    //                  therefore falls through to stable-sort insertion
+    //                  order (its scraper already walks the homepage
+    //                  top-to-bottom, which is newest-first in practice).
+    //
+    // Array.prototype.sort is stable in V8 (ES2019+), so ties are resolved
+    // by the original Object.entries order — exactly the prior behaviour.
+    const scoreCache = new Map();
+    const scoreOf = (key, entry) => {
+      let s = scoreCache.get(key);
+      if (!s) {
+        s = this.computeRecencyScore(entry);
+        scoreCache.set(key, s);
+      }
+      return s;
+    };
+    filteredEntries.sort(([aKey, aEntry], [bKey, bEntry]) => {
+      const [aTs, aId] = scoreOf(aKey, aEntry);
+      const [bTs, bId] = scoreOf(bKey, bEntry);
+      if (bTs !== aTs) return bTs - aTs;
+      return bId - aId;
+    });
 
     const totalItems = filteredEntries.length;
     const totalPages = Math.ceil(totalItems / limit);
