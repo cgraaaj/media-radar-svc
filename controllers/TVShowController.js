@@ -14,13 +14,18 @@ function sanitizeTier(raw, fallback) {
 // rule them all. Keeps bookkeeping and invalidation semantics unified.
 const responseCache = MovieController.responseCache;
 
+// Same DEFAULT_SOURCE semantics as MovieController — single source of truth
+// in MovieController so flipping MEDIA_RADAR_DEFAULT_SOURCE affects all
+// content endpoints atomically.
+const resolveSource = MovieController.resolveSource;
+
 class TVShowController {
   // Get TV shows with pagination (default tier: COLD = "all" catalog)
   async getTVShows(req, res) {
     try {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const language = req.query.language || null;
       const tier = sanitizeTier(req.query.tier, 'cold');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
@@ -127,7 +132,7 @@ class TVShowController {
       const query = req.query.q || '';
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const tier = sanitizeTier(req.query.tier, 'cold');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 

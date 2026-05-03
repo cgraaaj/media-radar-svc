@@ -10,6 +10,26 @@ function sanitizeTier(raw, fallback) {
   return (t === 'hot' || t === 'cold' || t === 'warm') ? t : fallback;
 }
 
+// Default source filter when the caller doesn't pass `?source=`.
+//
+// Set to '1tamilmv' so the public site lands on the "latest catalog,
+// 1tamilmv first" view by default. The env var lets ops flip this back
+// to 'all' (or any other source) without a code change. Pass
+// `?source=all` (or any other source slug) on a request to override
+// per-call — backwards compatible with every existing caller.
+const DEFAULT_SOURCE = process.env.MEDIA_RADAR_DEFAULT_SOURCE || '1tamilmv';
+
+// Resolve the effective `source` filter for a request, honouring an
+// explicit `?source=` override (including the `all` sentinel) and
+// falling back to `DEFAULT_SOURCE` when omitted.
+function resolveSource(rawSource) {
+  if (rawSource === undefined || rawSource === null || rawSource === '') {
+    return DEFAULT_SOURCE === 'all' ? null : DEFAULT_SOURCE;
+  }
+  const s = String(rawSource).toLowerCase();
+  return s === 'all' ? null : s;
+}
+
 // Shared cache across all movie endpoints (singleton). Exported via module
 // for /health and invalidation from the analysis routes if needed.
 const responseCache = new ResponseCache({
@@ -25,7 +45,7 @@ class MovieController {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
       const language = req.query.language || null;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const tier = sanitizeTier(req.query.tier, 'cold');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
       // The UI consolidated "Top Releases" + "Recently Added" + catalog into a
@@ -148,7 +168,7 @@ class MovieController {
       const query = req.query.q || '';
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const tier = sanitizeTier(req.query.tier, 'cold');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
@@ -310,7 +330,7 @@ class MovieController {
   async getTopReleases(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 10;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const tier = sanitizeTier(req.query.tier, 'hot');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
@@ -377,7 +397,7 @@ class MovieController {
   async getRecentlyAdded(req, res) {
     try {
       const limit = parseInt(req.query.limit) || 20;
-      const source = req.query.source || null;
+      const source = resolveSource(req.query.source);
       const tier = sanitizeTier(req.query.tier, 'hot');
       const bypassCache = req.query.noCache === '1' || req.headers['cache-control'] === 'no-cache';
 
@@ -443,4 +463,9 @@ class MovieController {
 
 const controllerInstance = new MovieController();
 controllerInstance.responseCache = responseCache;
+// Re-export the source-default helper so TVShowController + any future
+// controller can apply identical "default = 1tamilmv, ?source=all opts out"
+// semantics without re-defining the env-var fallback in N places.
+controllerInstance.resolveSource = resolveSource;
+controllerInstance.DEFAULT_SOURCE = DEFAULT_SOURCE;
 module.exports = controllerInstance;
