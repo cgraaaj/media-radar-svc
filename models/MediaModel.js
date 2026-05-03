@@ -438,20 +438,39 @@ class MediaModel {
         : ['legacy', 'cold', 'hot'];
 
     let lastErr = null;
+    let lastEmptyTier = null;
     for (const t of order) {
       try {
         const data = await this._fetchBlobForTier(t);
-        if (data) {
-          if (t !== resolved) {
-            console.warn(`[MediaModel] tier=${resolved} unavailable, served from ${t} (${CACHE_KEYS[t]})`);
-          }
-          // Stamp the effective tier so downstream code/UI can tell.
-          if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
-            data.__tier = t;
-            data.__cacheKey = CACHE_KEYS[t];
-          }
-          return data;
+        if (!data) continue;
+        // A present-but-empty blob (e.g. cold-radar published a hot run
+        // that resolved zero anchors) is functionally indistinguishable
+        // from a missing key for the user — both produce a black-hole UI.
+        // Treat it as "no data here" and walk the fallback chain so the
+        // user sees the cold catalog rather than an empty page. We still
+        // log it loudly because steady-state empty blobs indicate an
+        // upstream pipeline regression.
+        if (this._isBlobEmpty(data)) {
+          if (!lastEmptyTier) lastEmptyTier = t;
+          console.warn(
+            `[MediaModel] tier=${t} (${CACHE_KEYS[t]}) blob is empty (0 movies, 0 tvshows); ` +
+            `falling through to next tier in chain`
+          );
+          continue;
         }
+        if (t !== resolved) {
+          const reason = lastEmptyTier ? `${lastEmptyTier} was empty` : `${resolved} unavailable`;
+          console.warn(`[MediaModel] tier=${resolved} ${reason}, served from ${t} (${CACHE_KEYS[t]})`);
+        }
+        // Stamp the effective tier so downstream code/UI can tell.
+        if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+          data.__tier = t;
+          data.__cacheKey = CACHE_KEYS[t];
+          if (lastEmptyTier && lastEmptyTier !== t) {
+            data.__servedFallbackFrom = lastEmptyTier;
+          }
+        }
+        return data;
       } catch (err) {
         lastErr = err;
         // If breaker is open for this tier, keep walking the fallback chain.
@@ -459,6 +478,26 @@ class MediaModel {
       }
     }
     throw lastErr || new Error('No media data found in cache (all tiers empty)');
+  }
+
+  /**
+   * True iff the parsed blob has zero movies AND zero tvshows. Used by the
+   * tier fallback chain to skip "present but useless" blobs (most commonly
+   * a freshly-failed hot run that wrote {movies:{}, tvshows:{}} but the
+   * cold blob still has the full archive). Tolerates either object-keyed
+   * or array-shaped collections; a missing key counts as empty.
+   */
+  _isBlobEmpty(blob) {
+    if (!blob || typeof blob !== 'object') return true;
+    const movies = blob.movies;
+    const tvshows = blob.tvshows;
+    const movieCount = Array.isArray(movies)
+      ? movies.length
+      : (movies && typeof movies === 'object' ? Object.keys(movies).length : 0);
+    const tvCount = Array.isArray(tvshows)
+      ? tvshows.length
+      : (tvshows && typeof tvshows === 'object' ? Object.keys(tvshows).length : 0);
+    return movieCount === 0 && tvCount === 0;
   }
 
   async _fetchBlobForTier(tier) {
@@ -603,10 +642,18 @@ class MediaModel {
     }
 
     // Fetch both tiers in parallel. Tolerate either side being down.
-    const [hot, cold] = await Promise.all([
+    // Treat present-but-empty blobs as null so a failed hot run doesn't
+    // get unioned with cold and produce a misleading "hot present" stamp
+    // (and so __composition reports the truth: hot is not contributing).
+    const [hotRaw, coldRaw] = await Promise.all([
       this._fetchBlobForTier('hot').catch(err => { console.warn('[warm] hot fetch failed:', err.message); return null; }),
       this._fetchBlobForTier('cold').catch(err => { console.warn('[warm] cold fetch failed:', err.message); return null; }),
     ]);
+    const hot = this._isBlobEmpty(hotRaw) ? null : hotRaw;
+    const cold = this._isBlobEmpty(coldRaw) ? null : coldRaw;
+    if (hotRaw && !hot) {
+      console.warn('[warm] hot blob present but empty - dropping from union');
+    }
 
     if (!hot && !cold) {
       // Try legacy as a last resort
