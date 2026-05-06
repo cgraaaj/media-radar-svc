@@ -11,6 +11,7 @@ const aiRoutes = require('./routes/aiRoutes');
 const torrentStatsRoutes = require('./routes/torrentStatsRoutes');
 const webhookRoutes = require('./routes/webhookRoutes');
 const linksRoutes = require('./routes/linksRoutes');
+const LinkResolverService = require('./services/LinkResolverService');
 const logger = require('./config/logger');
 const { randomUUID } = require('crypto');
 
@@ -125,6 +126,13 @@ const server = app.listen(PORT, HOST, () => {
     redisClient.on('end', () => logger.info('Redis status', { connected: false }));
   }
   logger.info('CORS Origins', { origins: allowedOrigins });
+  // Boot LinkResolver: fetches the cold-radar /known-hosts allow-list and
+  // starts a periodic refresh. Done in the background so a slow / down
+  // cold-radar can't block server startup; until the first fetch lands
+  // we use the conservative baked-in fallback list.
+  LinkResolverService.init({ logger }).catch((e) => {
+    logger.warn('LinkResolver: init failed (will keep retrying in background)', { error: e.message });
+  });
 });
 
 // Graceful shutdown

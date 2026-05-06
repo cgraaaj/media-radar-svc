@@ -40,13 +40,32 @@ const COLD_RADAR_URL = (process.env.COLD_RADAR_URL || '').replace(/\/+$/, '');
 const TIMEOUT_MS = Number(process.env.COLD_RADAR_TIMEOUT_MS || 12000);
 const CACHE_TTL_MS = Number(process.env.LINK_RESOLVE_CACHE_TTL_MS || 10 * 60 * 1000);
 const CACHE_MAX = Number(process.env.LINK_RESOLVE_CACHE_MAX || 1024);
+const KNOWN_HOSTS_REFRESH_MS = Number(process.env.LINK_RESOLVE_HOSTS_REFRESH_MS || 5 * 60 * 1000);
 
-// Redirector / streaming hosts the cold-radar resolver knows how to walk.
-// Keep in sync with `n8n/scrapers/cold-radar/app/hdhub4u/resolver.py`.
-const ALLOWED_HOST_FRAGMENTS = [
+/**
+ * Redirector host allow-list.
+ *
+ * Source of truth is cold-radar's GET /known-hosts endpoint, fetched at
+ * startup and on a periodic refresh. The hard-coded fallback below is the
+ * conservative baseline used (a) until the first successful fetch, and
+ * (b) if cold-radar is unreachable.
+ *
+ * Why dynamic: on 2026-05-06 we shipped a `hblinks.dad` parser in
+ * cold-radar but forgot to add it here. Every user-initiated /resolve
+ * for an hblinks intermediate URL was rejected with 400 host_not_allowed,
+ * the frontend's catch block fell back to opening the ad page directly,
+ * and the user complained their downloads "kept resolving to another
+ * ad-gated link". The dynamic fetch eliminates this entire class of
+ * "two services, two allow-lists" drift bugs.
+ */
+const FALLBACK_ALLOWED_HOST_FRAGMENTS = Object.freeze([
   'hubdrive.', 'hubcdn.', 'gadgetsweb.', 'cryptoinsights.', 'hubcloud.',
-  'hdstream4u.', 'hubstream.', '4khdhub.',
-];
+  'hdstream4u.', 'hubstream.', '4khdhub.', 'hblinks.', 'hubrouting.',
+  'gamerxyt.',
+]);
+
+let allowedHostFragments = [...FALLBACK_ALLOWED_HOST_FRAGMENTS];
+let lastHostsFetch = { at: 0, ok: false, error: null, source: 'fallback' };
 
 function hostOf(url) {
   const m = String(url || '').match(/^https?:\/\/([^\/?#:]+)/i);
@@ -56,7 +75,52 @@ function hostOf(url) {
 function isAllowedHost(url) {
   const h = hostOf(url);
   if (!h) return false;
-  return ALLOWED_HOST_FRAGMENTS.some((frag) => h.includes(frag));
+  return allowedHostFragments.some((frag) => h.includes(frag));
+}
+
+async function refreshAllowedHosts({ logger } = {}) {
+  if (!COLD_RADAR_URL) {
+    return { ok: false, error: 'cold_radar_not_configured' };
+  }
+  try {
+    const { data } = await axios.get(`${COLD_RADAR_URL}/known-hosts`, { timeout: 5000 });
+    const next = Array.isArray(data?.hostFragments)
+      ? data.hostFragments.filter((s) => typeof s === 'string' && s.length > 1)
+      : null;
+    if (!next || next.length === 0) {
+      throw new Error('cold-radar /known-hosts returned no fragments');
+    }
+    // Always merge in the fallback so a cold-radar misconfiguration can
+    // never SHRINK the allow-list below what we know is safe to walk.
+    const merged = Array.from(new Set([...next, ...FALLBACK_ALLOWED_HOST_FRAGMENTS])).sort();
+    const changed = JSON.stringify(merged) !== JSON.stringify(allowedHostFragments);
+    allowedHostFragments = merged;
+    lastHostsFetch = {
+      at: Date.now(),
+      ok: true,
+      error: null,
+      source: 'cold-radar',
+      count: merged.length,
+      coldRadarVersion: data?.codeVersion || null,
+    };
+    if (changed && logger) {
+      logger.info('LinkResolver: allow-list synced from cold-radar', {
+        count: merged.length,
+        coldRadarVersion: data?.codeVersion,
+        fragments: merged,
+      });
+    }
+    return { ok: true, count: merged.length, changed };
+  } catch (e) {
+    lastHostsFetch = {
+      at: Date.now(),
+      ok: false,
+      error: e.message,
+      source: allowedHostFragments === FALLBACK_ALLOWED_HOST_FRAGMENTS ? 'fallback' : 'last-good',
+    };
+    if (logger) logger.warn('LinkResolver: known-hosts fetch failed', { error: e.message });
+    return { ok: false, error: e.message };
+  }
 }
 
 class LRUCache {
@@ -115,10 +179,30 @@ class LinkResolverService {
       throw err;
     }
     if (!isAllowedHost(intermediateUrl)) {
-      const err = new Error('host_not_allowed');
-      err.statusCode = 400;
-      err.detail = `Host '${hostOf(intermediateUrl)}' is not in the redirector allow-list`;
-      throw err;
+      // On-demand refresh: the allow-list cache may be stale because
+      // cold-radar shipped a new parser since our last poll. Trigger a
+      // refresh and re-check ONCE before giving up. This shrinks the
+      // mean-time-to-recovery for new-parser rollouts from "next
+      // periodic refresh" (5min default) to "next user click".
+      try {
+        const refresh = await refreshAllowedHosts({ logger });
+        if (refresh.ok && isAllowedHost(intermediateUrl)) {
+          logger.info('LinkResolver: host became allowed after on-demand refresh', {
+            host: hostOf(intermediateUrl),
+          });
+        } else {
+          const err = new Error('host_not_allowed');
+          err.statusCode = 400;
+          err.detail = `Host '${hostOf(intermediateUrl)}' is not in the redirector allow-list (refreshed ${refresh.ok ? 'ok' : 'failed: ' + refresh.error}; ${allowedHostFragments.length} fragments known)`;
+          throw err;
+        }
+      } catch (refreshErr) {
+        if (refreshErr.statusCode) throw refreshErr;
+        const err = new Error('host_not_allowed');
+        err.statusCode = 400;
+        err.detail = `Host '${hostOf(intermediateUrl)}' is not in the redirector allow-list (refresh attempt errored: ${refreshErr.message})`;
+        throw err;
+      }
     }
     if (!COLD_RADAR_URL) {
       const err = new Error('cold_radar_not_configured');
@@ -202,7 +286,39 @@ class LinkResolverService {
       cacheTtlMs: CACHE_TTL_MS,
       cacheSize: cache.map.size,
       cacheMax: CACHE_MAX,
+      allowList: {
+        fragments: [...allowedHostFragments],
+        count: allowedHostFragments.length,
+        lastFetch: { ...lastHostsFetch },
+        refreshIntervalMs: KNOWN_HOSTS_REFRESH_MS,
+      },
     };
+  }
+
+  /**
+   * Boot the service: fetch the allow-list from cold-radar, then start a
+   * periodic refresh. Safe to call multiple times — the timer is stored
+   * on the function object so a re-init just resets it. Tolerates
+   * cold-radar being briefly unreachable (falls back to the baked-in
+   * fragments and keeps trying in the background).
+   */
+  static async init({ logger: log = logger } = {}) {
+    if (!COLD_RADAR_URL) {
+      log.warn('LinkResolver: COLD_RADAR_URL not set — allow-list locked to baked-in fallback');
+      return;
+    }
+    await refreshAllowedHosts({ logger: log });
+    if (LinkResolverService._timer) clearInterval(LinkResolverService._timer);
+    LinkResolverService._timer = setInterval(
+      () => { refreshAllowedHosts({ logger: log }).catch(() => {}); },
+      KNOWN_HOSTS_REFRESH_MS,
+    );
+    // Don't keep the event loop alive just for this poller.
+    if (LinkResolverService._timer.unref) LinkResolverService._timer.unref();
+  }
+
+  static async refreshHosts() {
+    return refreshAllowedHosts({ logger });
   }
 }
 
