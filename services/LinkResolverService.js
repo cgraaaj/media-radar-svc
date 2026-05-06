@@ -320,6 +320,88 @@ class LinkResolverService {
   static async refreshHosts() {
     return refreshAllowedHosts({ logger });
   }
+
+  /**
+   * User-driven recheck of an EXPIRED row.
+   *
+   * Forwards to cold-radar's POST /recheck which:
+   *   1. Looks up the link's parent post URL.
+   *   2. Re-fetches that post page once.
+   *   3. Re-parses + re-resolves all anchors, ingests anything new.
+   *   4. Returns counts so the UI can decide whether to refresh.
+   *
+   * Why this is a separate path from /resolve:
+   *   * /resolve walks one intermediate URL — already known dead, so re-
+   *     walking it is a no-op. The interesting question is "did upstream
+   *     re-upload under the SAME post URL with NEW file IDs?" — that's
+   *     a post-page recrawl, not a link recrawl.
+   *   * Synchronous on purpose: the user is staring at a spinner, so the
+   *     response carries the actual newLinks count rather than queuing
+   *     fire-and-forget work like the /resolve auto-recovery does.
+   *   * Cheap: one upstream request to hdhub4u + parse. Bounded by the
+   *     route-level rate limit in linksRoutes.js.
+   *
+   * Caveats / non-goals:
+   *   * Only works for hdhub4u catalog rows (1tamilmv files don't have a
+   *     re-walkable parent post — each magnet is its own forum thread).
+   *     Cold-radar returns ``{found: false, error: 'post_url_missing_or_unsupported'}``.
+   *   * Doesn't refresh Redis cache. The next hot/cold sweep (or a
+   *     manual /admin/materialize) picks up the new rows.
+   */
+  static async recheck({ intermediateUrl }) {
+    if (typeof intermediateUrl !== 'string' || !/^https?:\/\//i.test(intermediateUrl)) {
+      const err = new Error('invalid_intermediate_url');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (!COLD_RADAR_URL) {
+      const err = new Error('cold_radar_not_configured');
+      err.statusCode = 503;
+      err.detail = 'Set COLD_RADAR_URL in the backend environment to enable upstream recheck.';
+      throw err;
+    }
+
+    const start = Date.now();
+    let res;
+    try {
+      res = await axios.post(
+        `${COLD_RADAR_URL}/recheck`,
+        { intermediateUrl },
+        {
+          timeout: Math.max(TIMEOUT_MS, 20000),
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    } catch (e) {
+      const elapsed = Date.now() - start;
+      const upstream = e.response?.data;
+      logger.warn('LinkResolver: cold-radar /recheck failed', {
+        intermediateUrl, elapsedMs: elapsed, message: e.message, upstream,
+      });
+      const err = new Error('cold_radar_unavailable');
+      err.statusCode = e.response?.status === 502 ? 502 : 504;
+      err.detail = upstream?.detail || e.message;
+      throw err;
+    }
+
+    const data = res.data || {};
+    const payload = {
+      found: !!data.found,
+      postUrl: data.postUrl || null,
+      newLinks: typeof data.newLinks === 'number' ? data.newLinks : 0,
+      movies: typeof data.movies === 'number' ? data.movies : 0,
+      tvshows: typeof data.tvshows === 'number' ? data.tvshows : 0,
+      error: data.error || null,
+    };
+
+    logger.info('LinkResolver: cold-radar /recheck ok', {
+      intermediateUrl,
+      ...payload,
+      elapsedMs: Date.now() - start,
+    });
+
+    return payload;
+  }
 }
 
 module.exports = LinkResolverService;

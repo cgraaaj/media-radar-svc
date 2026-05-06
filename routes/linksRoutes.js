@@ -77,6 +77,38 @@ router.post('/resolve', rateLimit, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/links/recheck
+ *   Body: { intermediateUrl }
+ *   Returns: { found, postUrl, newLinks, movies, tvshows, error }
+ *
+ * Frontend wires this to the 🔄 Re-check button on EXPIRED rows. Cold-radar
+ * looks up the parent post URL, recrawls it once, and reports whether it
+ * found any new mirrors. Same rate-limit budget as /resolve to avoid
+ * abusive recheck loops on a dead post.
+ *
+ * Why a different endpoint than /resolve:
+ *   * /resolve walks ONE intermediate URL — already-known-dead links don't
+ *     come back at the link level. The interesting question is whether the
+ *     parent POST got new file IDs after upstream re-uploaded.
+ *   * Synchronous, returns counts so the UI can decide between toast
+ *     ("still no live mirrors") and refresh ("3 new qualities!").
+ */
+router.post('/recheck', rateLimit, async (req, res) => {
+  const { intermediateUrl } = req.body || {};
+  try {
+    const result = await LinkResolverService.recheck({ intermediateUrl });
+    return res.json(result);
+  } catch (err) {
+    const code = err.statusCode || 500;
+    const body = { error: err.message || 'recheck_failed', detail: err.detail || undefined };
+    if (code >= 500) {
+      logger.error('Link recheck failed', { intermediateUrl, error: err.message, code });
+    }
+    return res.status(code).json(body);
+  }
+});
+
 router.get('/health', (_req, res) => {
   res.json(LinkResolverService.stats());
 });
