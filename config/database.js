@@ -4,6 +4,11 @@ const fs = require('fs');
 const CREDS_FILE_PATH = process.env.VAULT_CREDS_FILE || '/vault/secrets/creds.env';
 const isK8sRuntime = (process.env.RUNTIME_ENV || '').toLowerCase() === 'k8s';
 
+const RECONNECT_BACKOFF_MIN_MS = 1000;
+const RECONNECT_BACKOFF_MAX_MS = 30000;
+const ERROR_LOG_THROTTLE_MS = 5000;
+const FILE_WATCH_INTERVAL_MS = 2000;
+
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
   const lines = fs.readFileSync(filePath, 'utf8').split('\n');
@@ -30,8 +35,8 @@ function buildCreds() {
   if (!isK8sRuntime) return base;
   const fileCreds = parseEnvFile(CREDS_FILE_PATH);
   return {
-    REDIS_HOST: base.REDIS_HOST,        // always from env
-    REDIS_PORT: base.REDIS_PORT,        // always from env
+    REDIS_HOST: base.REDIS_HOST,
+    REDIS_PORT: base.REDIS_PORT,
     REDIS_USERNAME: fileCreds.REDIS_USERNAME || base.REDIS_USERNAME,
     REDIS_PASSWORD: fileCreds.REDIS_PASSWORD || base.REDIS_PASSWORD,
   };
@@ -39,34 +44,53 @@ function buildCreds() {
 
 let redisClient = null;
 let reconnectTimer = null;
-let reconnectingNow = false;
+let reconnecting = false;
+let backoffMs = RECONNECT_BACKOFF_MIN_MS;
+let lastErrorLogAt = 0;
+let lastErrorMessage = '';
+
+function logRedisErrorThrottled(message) {
+  const now = Date.now();
+  if (now - lastErrorLogAt > ERROR_LOG_THROTTLE_MS || message !== lastErrorMessage) {
+    console.error('Redis Client Error:', message);
+    lastErrorLogAt = now;
+    lastErrorMessage = message;
+  }
+}
+
+function isAuthError(err) {
+  const msg = ((err && err.message) || '').toLowerCase();
+  return msg.includes('wrongpass') || msg.includes('noauth') || msg.includes('user is disabled');
+}
 
 async function connectWithFreshCreds() {
   const creds = buildCreds();
 
   if (redisClient) {
-    try { await redisClient.quit(); } catch (_) { try { await redisClient.disconnect(); } catch (_) {} }
+    try { await redisClient.quit(); }
+    catch (_) { try { await redisClient.disconnect(); } catch (_) {} }
     redisClient = null;
   }
 
   const client = redis.createClient({
     socket: {
-      host: process.env.REDIS_HOST,
-      port: process.env.REDIS_PORT,
+      host: creds.REDIS_HOST,
+      port: Number(creds.REDIS_PORT),
       reconnectStrategy: () => 0,
     },
     username: creds.REDIS_USERNAME,
     password: creds.REDIS_PASSWORD,
   });
 
-  client.on('ready', () => console.log('Redis ready'));
-  client.on('end', scheduleReconnect);
-  client.on('error', async (e) => {
-    console.error('Redis Client Error:', e.message);
-    const msg = (e && e.message) ? e.message.toLowerCase() : '';
-    // If creds are invalid/expired, force an immediate reconnect to re-read fresh creds
-    if (msg.includes('wrongpass') || msg.includes('noauth') || msg.includes('user is disabled')) {
-      await forceReconnectNow();
+  client.on('ready', () => {
+    backoffMs = RECONNECT_BACKOFF_MIN_MS;
+    console.log('Redis ready');
+  });
+  client.on('end', () => scheduleReconnect());
+  client.on('error', (e) => {
+    logRedisErrorThrottled((e && e.message) || String(e));
+    if (isAuthError(e)) {
+      scheduleReconnect();
     }
   });
 
@@ -74,40 +98,42 @@ async function connectWithFreshCreds() {
   redisClient = client;
 }
 
-function scheduleReconnect(delayMs = 1000) {
-  if (reconnectTimer) return;
+function scheduleReconnect() {
+  if (reconnectTimer || reconnecting) return;
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
+    reconnecting = true;
     try {
       await connectWithFreshCreds();
-      console.log('Redis reconnected with (possibly rotated) credentials');
+      console.log('Redis reconnected with current credentials');
     } catch (e) {
-      console.error('Redis reconnect failed:', e.message);
-      scheduleReconnect(Math.min(delayMs * 2, 15000));
+      logRedisErrorThrottled(`reconnect failed: ${e.message}`);
+      backoffMs = Math.min(backoffMs * 2, RECONNECT_BACKOFF_MAX_MS);
+      reconnecting = false;
+      scheduleReconnect();
+      return;
     }
-  }, delayMs);
+    reconnecting = false;
+  }, backoffMs);
 }
 
-async function forceReconnectNow() {
-  if (reconnectingNow) return;
-  reconnectingNow = true;
-  try {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    await connectWithFreshCreds();
-    console.log('Redis force-reconnected after auth error');
-  } catch (e) {
-    console.error('Redis force-reconnect failed:', e.message);
-    scheduleReconnect(1000);
-  } finally {
-    reconnectingNow = false;
-  }
+function watchCredsFile() {
+  if (!isK8sRuntime) return;
+  if (!fs.existsSync(CREDS_FILE_PATH)) return;
+  fs.watchFile(CREDS_FILE_PATH, { interval: FILE_WATCH_INTERVAL_MS }, (curr, prev) => {
+    if (curr.mtimeMs === prev.mtimeMs) return;
+    console.log('Vault creds file changed - reloading Redis client');
+    backoffMs = RECONNECT_BACKOFF_MIN_MS;
+    scheduleReconnect();
+  });
 }
 
 (async () => {
+  watchCredsFile();
   try {
     await connectWithFreshCreds();
   } catch (err) {
-    console.error('Failed to initialize Redis:', err.message);
+    logRedisErrorThrottled(`init failed: ${err.message}`);
     scheduleReconnect();
   }
 })();
@@ -115,4 +141,4 @@ async function forceReconnectNow() {
 module.exports = {
   get redisClient() { return redisClient; },
   isConnected: () => !!redisClient && redisClient.isOpen,
-}; 
+};

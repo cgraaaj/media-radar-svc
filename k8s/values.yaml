@@ -32,9 +32,16 @@ serviceAccount:
   name: "mediaradar-svc-sa"
 
 # This is for setting Kubernetes Annotations to a Pod.
-# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/ 
+# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
 podAnnotations:
-  vault.hashicorp.com/service-account-token-expiration: "3600"
+  # Bumped from 1h to 24h: child leases (Redis static-creds) are bounded by
+  # this token's lifetime; with 1h the renewer kept dying mid-flight and the
+  # rendered creds file went stale, producing the WRONGPASS log storm.
+  # Must be >= the static-role rotation_period (currently 24h).
+  vault.hashicorp.com/service-account-token-expiration: "86400"
+  # Don't crash the sidecar on transient Vault hiccups; the app handles
+  # stale-creds windows via fs.watchFile reload and bounded backoff.
+  vault.hashicorp.com/template-config-exit-on-retry-failure: "false"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
@@ -109,13 +116,16 @@ vault:
     # Env vars expected by the app:
     env:
       app-config: "kv-v2/data/mediaradar/api-keys"
-    # name => Vault secret path (for file injection)
+    # name => Vault secret path (for file injection).
+    # Redis uses a Vault *static-role* (fixed username `mediaradar-svc-app`,
+    # password rotated every 24h). See vault-secrets-platform/README.md ->
+    # "Static vs Dynamic Roles" for the rationale.
     secrets:
-      creds.env: "database/creds/redis-readonly"
+      creds.env: "database/static-creds/redis-mediaradar-svc"
     # name => template body (for custom rendered files)
     templates:
       creds.env: |
-        {{- with secret "database/creds/redis-readonly" -}}
+        {{- with secret "database/static-creds/redis-mediaradar-svc" -}}
         REDIS_USERNAME="{{ .Data.username }}"
         REDIS_PASSWORD="{{ .Data.password }}"
         {{- end }}
