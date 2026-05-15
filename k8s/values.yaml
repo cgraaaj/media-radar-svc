@@ -42,6 +42,18 @@ podAnnotations:
   # Don't crash the sidecar on transient Vault hiccups; the app handles
   # stale-creds windows via fs.watchFile reload and bounded backoff.
   vault.hashicorp.com/template-config-exit-on-retry-failure: "false"
+  # Re-poll interval for KV (kv-v2/data/mediaradar/api-keys) — agent picks
+  # up edited API keys within 30s instead of waiting for a renew cycle.
+  #
+  # NB: this annotation is INTENTIONALLY ALSO SET IN HOPE that upstream
+  # vault-agent fixes hashicorp/vault#19287 — today the database engine's
+  # static-creds path is classified as "leased non-renewable" and the
+  # static-render-interval is silently ignored for it. Until that lands,
+  # creds.env is only refreshed on pod restart or after rotation_period.
+  # See hashicorpvault/README.md -> "Known limitation". The verifier
+  # CronJob + Prometheus alert catch any drift in <10 min so this is
+  # safe in practice.
+  vault.hashicorp.com/template-static-secret-render-interval: "30s"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
