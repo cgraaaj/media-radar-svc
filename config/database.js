@@ -8,6 +8,8 @@ const RECONNECT_BACKOFF_MIN_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 30000;
 const ERROR_LOG_THROTTLE_MS = 5000;
 const FILE_WATCH_INTERVAL_MS = 2000;
+const CONNECT_TIMEOUT_MS = 5000;
+const WATCHDOG_INTERVAL_MS = 15000;
 
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
@@ -63,6 +65,22 @@ function isAuthError(err) {
   return msg.includes('wrongpass') || msg.includes('noauth') || msg.includes('user is disabled');
 }
 
+function connectWithTimeout(client, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const t = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { client.disconnect(); } catch (_) {}
+      reject(new Error(`connect timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    client.connect().then(
+      () => { if (settled) return; settled = true; clearTimeout(t); resolve(); },
+      (err) => { if (settled) return; settled = true; clearTimeout(t); reject(err); }
+    );
+  });
+}
+
 async function connectWithFreshCreds() {
   const creds = buildCreds();
 
@@ -76,7 +94,13 @@ async function connectWithFreshCreds() {
     socket: {
       host: creds.REDIS_HOST,
       port: Number(creds.REDIS_PORT),
-      reconnectStrategy: () => 0,
+      // Disable node-redis' internal reconnect entirely; our scheduleReconnect()
+      // owns the retry loop and re-reads creds.env on every attempt. Returning
+      // a number here (incl. 0) makes node-redis loop forever with the SAME
+      // cached password, which used to wedge client.connect() during the brief
+      // Vault->Redis push lag at rotation time.
+      reconnectStrategy: false,
+      connectTimeout: CONNECT_TIMEOUT_MS,
     },
     username: creds.REDIS_USERNAME,
     password: creds.REDIS_PASSWORD,
@@ -94,7 +118,7 @@ async function connectWithFreshCreds() {
     }
   });
 
-  await client.connect();
+  await connectWithTimeout(client, CONNECT_TIMEOUT_MS);
   redisClient = client;
 }
 
@@ -128,8 +152,24 @@ function watchCredsFile() {
   });
 }
 
+// Belt-and-suspenders: if for any reason we end up without an open client and
+// no reconnect is in flight (e.g. a missed 'end' event, an exception swallowed
+// by the redis library), pick it up here. Cheap and idempotent — scheduleReconnect
+// itself is guarded by reconnectTimer/reconnecting.
+function startConnectionWatchdog() {
+  setInterval(() => {
+    const open = !!redisClient && redisClient.isOpen;
+    if (!open && !reconnectTimer && !reconnecting) {
+      console.log('Watchdog: Redis client not open - kicking reconnect');
+      backoffMs = RECONNECT_BACKOFF_MIN_MS;
+      scheduleReconnect();
+    }
+  }, WATCHDOG_INTERVAL_MS).unref();
+}
+
 (async () => {
   watchCredsFile();
+  startConnectionWatchdog();
   try {
     await connectWithFreshCreds();
   } catch (err) {
