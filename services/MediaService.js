@@ -1,5 +1,23 @@
 const axios = require('axios');
+const db = require('../config/database');
 const { normalizeLanguage, cleanFilename, formatFileSize, extractSizeFromFilename, getSafePosterUrl, analyzeGenreFromTitle } = require('../helpers/utils');
+
+// External-API timeout (TMDB/OMDb). Lower than the old hard-coded 5s so a
+// single slow upstream can't dominate page latency.
+const API_TIMEOUT_MS = parseInt(process.env.MEDIA_API_TIMEOUT_MS || '4000', 10);
+
+// Enrichment cache tuning. The metadata for a (title, year) is effectively
+// immutable, so we cache aggressively. Negative (not-found) results are
+// cached for a shorter window so newly-added titles get a retry sooner.
+const ENRICH_CACHE_TTL_MS = parseInt(process.env.ENRICH_CACHE_TTL_MS || String(7 * 24 * 60 * 60 * 1000), 10);
+const ENRICH_NEG_TTL_MS = parseInt(process.env.ENRICH_NEG_TTL_MS || String(6 * 60 * 60 * 1000), 10);
+const ENRICH_MEM_MAX = parseInt(process.env.ENRICH_MEM_MAX || '5000', 10);
+const ENRICH_REDIS_PREFIX = process.env.ENRICH_REDIS_PREFIX || 'media_radar_enrich:';
+const ENRICH_REDIS_ENABLED = (process.env.ENRICH_REDIS_CACHE || '1') !== '0';
+// How many entries to enrich in parallel per page. Bounded so we stay well
+// under TMDB's rate limit while collapsing the old 5-wide + 100ms-sleep batch
+// loop (which serialised a page into ~20s on a cold cache).
+const ENRICH_CONCURRENCY = parseInt(process.env.ENRICH_CONCURRENCY || '10', 10);
 
 // API configurations from environment variables
 const TMDB_API_KEY = process.env.TMDB_API_KEY ;
@@ -30,7 +48,7 @@ class MediaService {
       const response = await axios.get(`${TMDB_BASE_URL}${endpoint}`, {
         params: { api_key: TMDB_API_KEY, ...params },
         headers: { 'Authorization': `Bearer ${TMDB_ACCESS_TOKEN}` },
-        timeout: 5000
+        timeout: API_TIMEOUT_MS
       });
       return response.data;
     } catch (error) {
@@ -44,7 +62,7 @@ class MediaService {
     try {
       const response = await axios.get(OMDB_BASE_URL, {
         params: { apikey: OMDB_API_KEY, ...params },
-        timeout: 5000
+        timeout: API_TIMEOUT_MS
       });
       return response.data?.Response === 'True' ? response.data : null;
     } catch (error) {
@@ -475,127 +493,194 @@ class MediaService {
     return merged;
   }
 
-  // Get media details with caching
-  async getMediaDetails(title, year, mediaType) {
-    const cacheKey = `${title}_${year}_${mediaType}`;
-    let mediaDetails = this.cache.get(cacheKey);
-    
-    if (!mediaDetails) {
-      // Try TMDB first, then OMDb as fallback
-      if (mediaType === 'movie') {
-        mediaDetails = await this.fetchOMDbMovieDetails(title, year);
-          if (!mediaDetails) {
-            mediaDetails = await this.fetchTMDBMovieDetails(title, year);
-        }
-      } else if (mediaType === 'tvshow') {
-        mediaDetails = await this.fetchOMDbTVShowDetails(title, year);
-          if (!mediaDetails) {
-            mediaDetails = await this.fetchTMDBTVShowDetails(title, year);
-        }
-      }
-      
-      // Final fallback to basic data
-      if (!mediaDetails) {
-        mediaDetails = {
-          title: title,
-          year: year,
-          poster: DEFAULT_POSTERS[mediaType + 's'] || DEFAULT_POSTERS.movies,
-          genre: analyzeGenreFromTitle(title),
-          plot: 'No plot available.',
-          hasRealPoster: false,
-          dataSource: 'local',
-          type: mediaType
-        };
-      }
-      
-      // Cache the result
-      this.cache.set(cacheKey, mediaDetails);
+  // -------------------------------------------------------------------------
+  // Enrichment cache helpers (in-process LRU+TTL, shared Redis L2)
+  // -------------------------------------------------------------------------
+
+  /** Read from the bounded in-process cache, honouring TTL. */
+  _memGet(cacheKey) {
+    const entry = this.cache.get(cacheKey);
+    if (!entry) return null;
+    if (entry.exp <= Date.now()) {
+      this.cache.delete(cacheKey);
+      return null;
     }
-    
+    // LRU touch: re-insert to move to the tail.
+    this.cache.delete(cacheKey);
+    this.cache.set(cacheKey, entry);
+    return entry.data;
+  }
+
+  /** Write to the bounded in-process cache, evicting the oldest if needed. */
+  _memSet(cacheKey, data, ttlMs) {
+    this.cache.set(cacheKey, { data, exp: Date.now() + ttlMs });
+    while (this.cache.size > ENRICH_MEM_MAX) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+    }
+  }
+
+  /** L2 read: shared, restart-surviving Redis cache. Never throws. */
+  async _redisGet(cacheKey) {
+    if (!ENRICH_REDIS_ENABLED || !db.isConnected()) return null;
+    try {
+      const raw = await db.redisClient.get(ENRICH_REDIS_PREFIX + cacheKey);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** L2 write (fire-and-forget). Never throws. */
+  _redisSet(cacheKey, data, ttlMs) {
+    if (!ENRICH_REDIS_ENABLED || !db.isConnected()) return;
+    // node-redis v4: PX = expiry in ms. Best-effort; we don't await.
+    Promise.resolve(
+      db.redisClient.set(ENRICH_REDIS_PREFIX + cacheKey, JSON.stringify(data), { PX: ttlMs })
+    ).catch(() => {});
+  }
+
+  // Get media details with multi-layer caching (in-process L1 + Redis L2).
+  //
+  // Previously this used an unbounded in-process Map that never expired and
+  // was wiped on every restart — so the very first load of every page hit the
+  // external TMDB/OMDb APIs serially, which is what produced the ~20s page
+  // loads. The Redis L2 cache is shared across replicas and survives restarts,
+  // so a title only ever costs one external lookup, ever.
+  async getMediaDetails(title, year, mediaType) {
+    const cacheKey = `${mediaType}_${title}_${year}`;
+
+    const cached = this._memGet(cacheKey) || await this._redisGet(cacheKey);
+    if (cached) {
+      // Re-prime L1 if the hit came from L2.
+      const ttl = cached.dataSource === 'local' ? ENRICH_NEG_TTL_MS : ENRICH_CACHE_TTL_MS;
+      this._memSet(cacheKey, cached, ttl);
+      return cached;
+    }
+
+    let mediaDetails = null;
+    // Try OMDb first, then TMDB as fallback.
+    if (mediaType === 'movie') {
+      mediaDetails = await this.fetchOMDbMovieDetails(title, year);
+      if (!mediaDetails) mediaDetails = await this.fetchTMDBMovieDetails(title, year);
+    } else if (mediaType === 'tvshow') {
+      mediaDetails = await this.fetchOMDbTVShowDetails(title, year);
+      if (!mediaDetails) mediaDetails = await this.fetchTMDBTVShowDetails(title, year);
+    }
+
+    // Final fallback to basic data (negative result — cached for a shorter TTL
+    // so a title that is added to TMDB later gets re-enriched).
+    const isNegative = !mediaDetails;
+    if (isNegative) {
+      mediaDetails = {
+        title,
+        year,
+        poster: DEFAULT_POSTERS[mediaType + 's'] || DEFAULT_POSTERS.movies,
+        genre: analyzeGenreFromTitle(title),
+        plot: 'No plot available.',
+        hasRealPoster: false,
+        dataSource: 'local',
+        type: mediaType,
+      };
+    }
+
+    const ttl = isNegative ? ENRICH_NEG_TTL_MS : ENRICH_CACHE_TTL_MS;
+    this._memSet(cacheKey, mediaDetails, ttl);
+    this._redisSet(cacheKey, mediaDetails, ttl);
+
     return mediaDetails;
   }
 
-  // Transform entries to full media objects
-  async transformMediaEntries(entries, startIndex = 0, mediaType = 'movie') {
-    const transformedMedia = [];
-    const batchSize = 5;
+  // Transform a single [mediaKey, entry] pair into the UI-friendly object.
+  async transformOneEntry([mediaKey, entry], globalIndex, mediaType = 'movie') {
+    try {
+      // New wrapper has type/year/posterUrl/sources/qualities; old flat
+      // entries are plain quality maps.
+      const wrapper = (entry && typeof entry === 'object' && entry.qualities) ? entry : null;
+      const qualityData = wrapper ? wrapper.qualities : entry;
 
-    for (let i = 0; i < entries.length; i += batchSize) {
-      const batch = entries.slice(i, i + batchSize);
-      const batchPromises = batch.map(async ([mediaKey, entry], batchIndex) => {
-        const globalIndex = startIndex + i + batchIndex;
+      // Extract title and year from the key, but prefer wrapper.year when set.
+      const titleMatch = mediaKey.match(/^(.+?)\s*\((\d{4})\)$/);
+      const title = titleMatch ? titleMatch[1].trim() : mediaKey.trim();
+      const year = (wrapper && wrapper.year) || (titleMatch ? parseInt(titleMatch[2], 10) : new Date().getFullYear());
 
-        try {
-          // New wrapper has type/year/posterUrl/sources/qualities; old flat
-          // entries are plain quality maps.
-          const wrapper = (entry && typeof entry === 'object' && entry.qualities) ? entry : null;
-          const qualityData = wrapper ? wrapper.qualities : entry;
+      const mediaDetails = await this.getMediaDetails(title, year, mediaType);
 
-          // Extract title and year from the key, but prefer wrapper.year when set.
-          const titleMatch = mediaKey.match(/^(.+?)\s*\((\d{4})\)$/);
-          const title = titleMatch ? titleMatch[1].trim() : mediaKey.trim();
-          const year = (wrapper && wrapper.year) || (titleMatch ? parseInt(titleMatch[2], 10) : new Date().getFullYear());
+      const {
+        downloadOptions,
+        downloadLanguages,
+        totalFiles,
+        moviePosterUrl,
+        availableSources,
+        availableKinds,
+      } = this.processDownloadData(qualityData, mediaType);
 
-          const mediaDetails = await this.getMediaDetails(title, year, mediaType);
+      // Poster precedence: wrapper.posterUrl > first file.posterUrl > TMDB/OMDb > default.
+      const poster = (wrapper && wrapper.posterUrl) || moviePosterUrl || mediaDetails.poster;
 
-          const {
-            downloadOptions,
-            downloadLanguages,
-            totalFiles,
-            moviePosterUrl,
-            availableSources,
-            availableKinds,
-          } = this.processDownloadData(qualityData, mediaType);
+      const sources = wrapper && Array.isArray(wrapper.sources) && wrapper.sources.length
+        ? wrapper.sources
+        : availableSources;
 
-          // Poster precedence: wrapper.posterUrl > first file.posterUrl > TMDB/OMDb > default.
-          const poster = (wrapper && wrapper.posterUrl) || moviePosterUrl || mediaDetails.poster;
-
-          const sources = wrapper && Array.isArray(wrapper.sources) && wrapper.sources.length
-            ? wrapper.sources
-            : availableSources;
-
-          return {
-            id: globalIndex + 1,
-            ...mediaDetails,
-            poster,
-            downloadOptions,
-            downloadLanguages,
-            totalFiles,
-            originalKey: mediaKey,
-            sources,
-            availableKinds,
-            firstSeenAt: wrapper ? wrapper.firstSeenAt : undefined,
-            lastUpdatedAt: wrapper ? wrapper.lastUpdatedAt : undefined,
-          };
-        } catch (error) {
-          console.error(`Error transforming media ${mediaKey}:`, error);
-          return {
-            id: globalIndex + 1,
-            title: mediaKey,
-            year: new Date().getFullYear(),
-            poster: DEFAULT_POSTERS[mediaType + 's'] || DEFAULT_POSTERS.movies,
-            genre: 'Unknown',
-            downloadOptions: {},
-            totalFiles: 0,
-            hasRealPoster: false,
-            dataSource: 'error',
-            error: error.message,
-            type: mediaType,
-            sources: [],
-            availableKinds: [],
-          };
-        }
-      });
-
-      const batchResults = await Promise.all(batchPromises);
-      transformedMedia.push(...batchResults);
-
-      if (i + batchSize < entries.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      return {
+        id: globalIndex + 1,
+        ...mediaDetails,
+        poster,
+        downloadOptions,
+        downloadLanguages,
+        totalFiles,
+        originalKey: mediaKey,
+        sources,
+        availableKinds,
+        firstSeenAt: wrapper ? wrapper.firstSeenAt : undefined,
+        lastUpdatedAt: wrapper ? wrapper.lastUpdatedAt : undefined,
+      };
+    } catch (error) {
+      console.error(`Error transforming media ${mediaKey}:`, error);
+      return {
+        id: globalIndex + 1,
+        title: mediaKey,
+        year: new Date().getFullYear(),
+        poster: DEFAULT_POSTERS[mediaType + 's'] || DEFAULT_POSTERS.movies,
+        genre: 'Unknown',
+        downloadOptions: {},
+        totalFiles: 0,
+        hasRealPoster: false,
+        dataSource: 'error',
+        error: error.message,
+        type: mediaType,
+        sources: [],
+        availableKinds: [],
+      };
     }
+  }
 
-    return transformedMedia;
+  // Transform entries to full media objects.
+  //
+  // Uses a fixed-size worker pool (ENRICH_CONCURRENCY) instead of the old
+  // serial "5-wide batch + 100ms sleep" loop. Combined with the Redis-backed
+  // enrichment cache, a warm page now returns in a few ms and a cold page is
+  // bounded by ~ceil(N / concurrency) external round-trips rather than the
+  // previous ~20s. Output order is preserved (results indexed by position).
+  async transformMediaEntries(entries, startIndex = 0, mediaType = 'movie') {
+    if (!Array.isArray(entries) || entries.length === 0) return [];
+
+    const results = new Array(entries.length);
+    let cursor = 0;
+
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= entries.length) return;
+        results[i] = await this.transformOneEntry(entries[i], startIndex + i, mediaType);
+      }
+    };
+
+    const poolSize = Math.min(ENRICH_CONCURRENCY, entries.length);
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
+    return results;
   }
 }
 
