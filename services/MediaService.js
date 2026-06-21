@@ -353,17 +353,10 @@ class MediaService {
 
     // TV show season/episode metadata.
     if (mediaType === 'tvshow' && filename) {
-      const seasonMatch = filename.match(/[Ss](\d+)/);
-      const episodeMatch = filename.match(/[Ee](\d+)/);
-      if (seasonMatch) processed.season = parseInt(seasonMatch[1], 10);
-      if (episodeMatch) processed.episode = parseInt(episodeMatch[1], 10);
-      const rangeMatch = filename.match(/[Ee](\d+)-[Ee](\d+)/);
-      if (rangeMatch) {
-        processed.episodeRange = {
-          start: parseInt(rangeMatch[1], 10),
-          end: parseInt(rangeMatch[2], 10),
-        };
-      }
+      const { season, episode, episodeRange } = this.parseTvMeta(filename);
+      if (season != null) processed.season = season;
+      if (episode != null) processed.episode = episode;
+      if (episodeRange) processed.episodeRange = episodeRange;
     }
 
     if (processed.posterUrl && aggregates && !aggregates.moviePosterUrl) {
@@ -375,6 +368,87 @@ class MediaService {
     }
 
     return processed;
+  }
+
+  /**
+   * Extracts season / episode / episode-range metadata from a TV show filename.
+   *
+   * Handles the naming conventions seen across sources, e.g.:
+   *   "... S07 EP04 ..."      -> { season: 7,  episode: 4 }
+   *   "... S07E04 ..."        -> { season: 7,  episode: 4 }
+   *   "... Season 7 ..."      -> { season: 7 }
+   *   "... EP04-EP08 ..."     -> { episodeRange: { start: 4, end: 8 }, episode: 4 }
+   *   "... EP (01-08) ..."    -> { episodeRange: { start: 1, end: 8 }, episode: 1 }
+   *   "... Episode 4 ..."     -> { episode: 4 }
+   *
+   * The old `[Ee](\d+)` regex never matched the common `EP04` form (the char
+   * after `E` is `P`, not a digit), so the episode field was usually unset.
+   */
+  parseTvMeta(filename) {
+    const result = { season: null, episode: null, episodeRange: null };
+    if (typeof filename !== 'string' || !filename) return result;
+
+    // ----- Season: "Season 7", "S07", "S7" (incl. the S in "S07E04") -----
+    const seasonMatch =
+      filename.match(/\bSeason[\s._-]*(\d{1,2})\b/i) ||
+      filename.match(/\bS(\d{1,2})(?=[\s._-]|[Ee]|$)/);
+    if (seasonMatch) result.season = parseInt(seasonMatch[1], 10);
+
+    // ----- Episode range: "EP04-EP08", "E04-08", "EP (01-08)" -----
+    const rangeMatch = filename.match(
+      /\bE(?:P|pisode)?[\s._-]*\(?(\d{1,3})\)?[\s._-]*-[\s._-]*(?:E(?:P)?[\s._-]*)?\(?(\d{1,3})\)?/i,
+    );
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1], 10);
+      const end = parseInt(rangeMatch[2], 10);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        result.episodeRange = { start, end };
+        result.episode = start;
+        return result;
+      }
+    }
+
+    // ----- Single episode: "S07E04", "EP04", "Episode 4", "E04" -----
+    const epMatch =
+      filename.match(/S\d{1,2}[\s._-]*E(?:P)?[\s._-]*(\d{1,3})/i) ||
+      filename.match(/\bE(?:P|pisode)[\s._-]*(\d{1,3})/i) ||
+      filename.match(/\bE(\d{1,3})\b/);
+    if (epMatch) result.episode = parseInt(epMatch[1], 10);
+
+    return result;
+  }
+
+  /**
+   * Sorts TV episode files in-place by season then episode, newest first
+   * (latest episode at the top — consistent with the app's recency-first feed).
+   * Files without parseable episode info sink to the bottom while keeping their
+   * relative order (V8 sort is stable).
+   */
+  sortTvEpisodes(files) {
+    if (!Array.isArray(files)) return files;
+
+    const episodeOf = (f) => {
+      if (typeof f.episode === 'number') return f.episode;
+      if (f.episodeRange && typeof f.episodeRange.start === 'number') {
+        return f.episodeRange.start;
+      }
+      return null;
+    };
+
+    files.sort((a, b) => {
+      const seasonA = typeof a.season === 'number' ? a.season : -1;
+      const seasonB = typeof b.season === 'number' ? b.season : -1;
+      if (seasonA !== seasonB) return seasonB - seasonA; // season desc
+
+      const epA = episodeOf(a);
+      const epB = episodeOf(b);
+      if (epA == null && epB == null) return 0;
+      if (epA == null) return 1; // unknown episode -> bottom
+      if (epB == null) return -1;
+      return epB - epA; // episode desc (latest first)
+    });
+
+    return files;
   }
 
   /**
@@ -437,6 +511,11 @@ class MediaService {
         // Pair torrent/magnet siblings from the same source so the UI can show
         // both buttons on a single row. Matching is done by info_hash.
         const paired = this.pairTorrentMagnet(files);
+        // For TV shows, order episodes deterministically (latest first) instead
+        // of leaving them in crawl/post order, which appears jumbled.
+        if (mediaType === 'tvshow') {
+          this.sortTvEpisodes(paired);
+        }
         downloadOptions[quality] = paired;
       }
     }
