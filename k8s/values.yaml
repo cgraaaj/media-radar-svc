@@ -92,14 +92,30 @@ ingressRoute:
       kind: Rule
       # Authentik forward-auth. Browser fetches from the mediaradar UI
       # will carry the SSO cookie; non-browser clients must auth separately.
-      middlewares:
-        - name: ak-outpost-authentik-embedded-outpost
-          namespace: authentik
+      # TEMPORARILY DISABLED (2026-06-25) in lockstep with the frontend route
+      # so /api isn't left gated while the UI is open for testing. Replaced by
+      # the ipAllowList middleware below. RE-ENABLE before leaving public:
+      # /api/links/resolve is an effective open resolver without auth.
+      # middlewares:
+      #   - name: ak-outpost-authentik-embedded-outpost
+      #     namespace: authentik
       services:
         - name: mediaradar-svc-k8s
           port: 5000
   tls:
     secretName: "wildcard-cgraaaj-in-tls"
+
+# Traefik ipAllowList middleware (temporary auth stand-in) — mirrors the
+# frontend chart so the /api route is restricted to private ranges while the
+# authentik SSO gate is disabled. To restore SSO: set enabled=false AND
+# uncomment the authentik middleware above.
+ipAllowList:
+  enabled: true
+  sourceRange:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  # ipStrategy: {}  # only needed if a proxy (e.g. Cloudflare) fronts Traefik
 
 # Vault Agent Injector Configuration
 # Enable Vault Agent Injector for secret management

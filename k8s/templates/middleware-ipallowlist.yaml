@@ -1,0 +1,24 @@
+{{- if .Values.ipAllowList.enabled }}
+# Traefik v3 ipAllowList middleware. Temporary stand-in for the authentik
+# forward-auth on the /api route (commented out in values.yaml
+# ingressRoute.routes) so the backend API can be reached for testing WITHOUT
+# the SSO gate, while still rejecting any client outside the allowed source
+# ranges. mediaradar.cgraaaj.in resolves to a private LAN IP via metallb (no
+# upstream proxy), so Traefik sees the real client IP and a plain sourceRange
+# match is sufficient. Re-enable authentik + set ipAllowList.enabled=false to
+# restore SSO.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "k8s.fullname" . }}-ipallowlist
+  labels:
+    {{- include "k8s.labels" . | nindent 4 }}
+spec:
+  ipAllowList:
+    sourceRange:
+      {{- toYaml .Values.ipAllowList.sourceRange | nindent 6 }}
+    {{- with .Values.ipAllowList.ipStrategy }}
+    ipStrategy:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

@@ -18,8 +18,13 @@ spec:
     {{- range .Values.ingressRoute.routes }}
     - match: {{ .match | quote }}
       kind: {{ .kind | default "Rule" }}
-      {{- if .middlewares }}
+      {{- if or .middlewares $.Values.ipAllowList.enabled }}
       middlewares:
+        {{- if $.Values.ipAllowList.enabled }}
+        # Injected first so a disallowed IP is rejected before any other
+        # middleware runs. Name is templated to match middleware-ipallowlist.yaml.
+        - name: {{ include "k8s.fullname" $ }}-ipallowlist
+        {{- end }}
         {{- range .middlewares }}
         - name: {{ .name }}
           {{- if .namespace }}
