@@ -254,6 +254,11 @@ class LinkResolverService {
       intermediateUrl: data.intermediateUrl || intermediateUrl,
       finalUrl: data.finalUrl || null,
       finalUrlHost: data.finalUrlHost || null,
+      // Live manual-walk target for gated statuses (see cold-radar
+      // ResolveResponse.gatedUrl). Lets the frontend open a page that works in
+      // the user's browser instead of the captured-but-dead intermediate.
+      gatedUrl: data.gatedUrl || null,
+      gatedUrlHost: data.gatedUrlHost || null,
       cached: !!data.cached,
       resolvedAt: data.resolvedAt || null,
       hopCount: typeof data.hopCount === 'number' ? data.hopCount : null,

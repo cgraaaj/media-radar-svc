@@ -3,8 +3,8 @@
  *
  * POST /api/links/resolve
  *   Body: { intermediateUrl, forceFresh?, maxAgeSeconds? }
- *   Returns: { status, intermediateUrl, finalUrl, finalUrlHost, cached,
- *              resolvedAt, hopCount, error, source }
+ *   Returns: { status, intermediateUrl, finalUrl, finalUrlHost, gatedUrl,
+ *              gatedUrlHost, cached, resolvedAt, hopCount, error, source }
  *
  * GET  /api/links/health
  *   Diagnostics on whether COLD_RADAR_URL is wired up and local cache size.
